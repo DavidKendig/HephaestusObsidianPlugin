@@ -4,9 +4,15 @@ import {
   applyDelta,
   clampContext,
   conversationTokens,
+  decodePdfString,
+  docxTextFromXml,
+  docxTextParts,
+  listZipEntries,
   estimateTokens,
   fitVerdict,
+  findZipEntry,
   formatBytes,
+  inflateRaw,
   isBinary,
   normalizeUrl,
   pageLabel,
@@ -15,6 +21,7 @@ import {
   parseLspci,
   parseNvidiaSmi,
   parseOllamaShow,
+  pdfTextFromContent,
   parseSearxng,
   parseSizeString,
   parseSystemProfiler,
@@ -142,6 +149,157 @@ test("trimToBudget leaves a fitting thread untouched", () => {
   const { messages, trimmed } = trimToBudget(msgs, 1000);
   assert.equal(trimmed, 0);
   assert.deepEqual(messages, msgs);
+});
+
+// ----------------------------------------------------------- documents
+
+/** Build a minimal ZIP containing one file, so findZipEntry is tested
+ *  against real bytes rather than a hand-waved fixture. */
+function makeZip(name, contents, { deflate = null } = {}) {
+  const enc = new TextEncoder();
+  const nameBytes = enc.encode(name);
+  const raw = typeof contents === "string" ? enc.encode(contents) : contents;
+  const stored = deflate === null;
+  const data = stored ? raw : deflate;
+  const method = stored ? 0 : 8;
+
+  const local = new Uint8Array(30 + nameBytes.length + data.length);
+  const lv = new DataView(local.buffer);
+  lv.setUint32(0, 0x04034b50, true);
+  lv.setUint16(8, method, true);
+  lv.setUint32(18, data.length, true); // compressed size
+  lv.setUint32(22, raw.length, true); // uncompressed size
+  lv.setUint16(26, nameBytes.length, true);
+  lv.setUint16(28, 0, true);
+  local.set(nameBytes, 30);
+  local.set(data, 30 + nameBytes.length);
+
+  const central = new Uint8Array(46 + nameBytes.length);
+  const cv = new DataView(central.buffer);
+  cv.setUint32(0, 0x02014b50, true);
+  cv.setUint16(10, method, true);
+  cv.setUint32(20, data.length, true);
+  cv.setUint32(24, raw.length, true);
+  cv.setUint16(28, nameBytes.length, true);
+  cv.setUint32(42, 0, true); // local header offset
+  central.set(nameBytes, 46);
+
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(8, 1, true); // entries on this disk
+  ev.setUint16(10, 1, true); // total entries
+  ev.setUint32(12, central.length, true);
+  ev.setUint32(16, local.length, true); // central dir offset
+
+  const out = new Uint8Array(local.length + central.length + eocd.length);
+  out.set(local, 0);
+  out.set(central, local.length);
+  out.set(eocd, local.length + central.length);
+  return out;
+}
+
+async function deflateRaw(bytes) {
+  const cs = new CompressionStream("deflate-raw");
+  const stream = new Blob([bytes]).stream().pipeThrough(cs);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+test("findZipEntry locates a stored file", () => {
+  const zip = makeZip("word/document.xml", "<hello/>");
+  const entry = findZipEntry(zip, "word/document.xml");
+  assert.ok(entry);
+  assert.equal(entry.method, 0);
+  assert.equal(new TextDecoder().decode(entry.data), "<hello/>");
+  assert.equal(findZipEntry(zip, "missing.xml"), null);
+  assert.equal(findZipEntry(new Uint8Array(10), "x"), null);
+});
+
+test("inflateRaw round-trips a deflated entry", async () => {
+  const text = "paragraph text ".repeat(200);
+  const packed = await deflateRaw(new TextEncoder().encode(text));
+  const zip = makeZip("word/document.xml", text, { deflate: packed });
+  const entry = findZipEntry(zip, "word/document.xml");
+  assert.equal(entry.method, 8);
+  const out = await inflateRaw(entry.data);
+  assert.equal(new TextDecoder().decode(out), text);
+});
+
+test("docxTextFromXml extracts paragraphs, tabs and breaks", () => {
+  const xml = `<w:document><w:body>
+    <w:p><w:r><w:t>First line</w:t></w:r></w:p>
+    <w:p><w:r><w:t xml:space="preserve">Tab:</w:t><w:tab/><w:t>after</w:t></w:r></w:p>
+    <w:p><w:r><w:t>Before</w:t><w:br/><w:t>after break</w:t></w:r></w:p>
+    <w:p><w:r><w:t>Amp &amp; &lt;tag&gt;</w:t></w:r></w:p>
+  </w:body></w:document>`;
+  const text = docxTextFromXml(xml);
+  assert.match(text, /First line/);
+  assert.match(text, /Tab:\tafter/);
+  assert.match(text, /Before\nafter break/);
+  assert.match(text, /Amp & <tag>/);
+});
+
+test("docxTextFromXml drops field instructions and collapses blanks", () => {
+  const xml =
+    "<w:p><w:r><w:instrText>HYPERLINK junk</w:instrText></w:r></w:p>" +
+    "<w:p></w:p><w:p></w:p><w:p><w:r><w:t>Real</w:t></w:r></w:p>";
+  const text = docxTextFromXml(xml);
+  assert.doesNotMatch(text, /HYPERLINK/);
+  assert.equal(text, "Real");
+});
+
+test("docxTextParts reads body first, then headers and notes", () => {
+  const names = [
+    "[Content_Types].xml",
+    "word/footer1.xml",
+    "word/document.xml",
+    "word/media/image1.png",
+    "word/footnotes.xml",
+    "word/header1.xml",
+    "word/styles.xml",
+  ];
+  const parts = docxTextParts(names);
+  assert.equal(parts[0], "word/document.xml");
+  assert.ok(parts.includes("word/header1.xml"));
+  assert.ok(parts.includes("word/footer1.xml"));
+  assert.ok(parts.includes("word/footnotes.xml"));
+  // Styles and images carry no body text.
+  assert.ok(!parts.includes("word/styles.xml"));
+  assert.ok(!parts.some((p) => p.includes("media")));
+  assert.deepEqual(docxTextParts([]), []);
+});
+
+test("listZipEntries names every file in the archive", () => {
+  const zip = makeZip("word/document.xml", "<x/>");
+  assert.deepEqual(listZipEntries(zip), ["word/document.xml"]);
+  assert.deepEqual(listZipEntries(new Uint8Array(5)), []);
+});
+
+test("decodePdfString handles escapes and octal", () => {
+  assert.equal(decodePdfString("plain"), "plain");
+  assert.equal(decodePdfString("a\\(b\\)c"), "a(b)c");
+  assert.equal(decodePdfString("line\\nbreak"), "line\nbreak");
+  assert.equal(decodePdfString("\\101\\102"), "AB");
+  assert.equal(decodePdfString("back\\\\slash"), "back\\slash");
+});
+
+test("pdfTextFromContent reads Tj, TJ and hex strings", () => {
+  const content = `
+    BT /F1 12 Tf 72 720 Td (Hello ) Tj
+    [(wor) -20 (ld)] TJ
+    T*
+    <48656C6C6F> Tj
+    ET`;
+  const text = pdfTextFromContent(content);
+  assert.match(text, /Hello/);
+  assert.match(text, /world/);
+  // The hex string decodes to "Hello" too.
+  assert.equal((text.match(/Hello/g) || []).length, 2);
+});
+
+test("pdfTextFromContent ignores non-text operators", () => {
+  const content = "0 0 1 RG 10 10 m 20 20 l S BT (Only this) Tj ET";
+  assert.equal(pdfTextFromContent(content), "Only this");
 });
 
 // -------------------------------------------------------------- search

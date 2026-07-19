@@ -151,6 +151,236 @@ export function trimToBudget(
   return { messages: kept, trimmed };
 }
 
+// -------------------------------------------------------- documents
+
+/** Inflate a raw deflate stream using the platform's own decompressor.
+ *  Both Electron and Node ship DecompressionStream, so DOCX support
+ *  costs no bundled dependency at all. */
+export async function inflateRaw(bytes: Uint8Array): Promise<Uint8Array> {
+  const ds = new DecompressionStream("deflate-raw");
+  const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(ds);
+  const buf = await new Response(stream).arrayBuffer();
+  return new Uint8Array(buf);
+}
+
+function u16(b: Uint8Array, i: number): number {
+  return b[i] | (b[i + 1] << 8);
+}
+function u32(b: Uint8Array, i: number): number {
+  return (
+    (b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | (b[i + 3] << 24)) >>> 0
+  );
+}
+
+export interface ZipEntry {
+  /** 0 = stored, 8 = deflate. */
+  method: number;
+  data: Uint8Array;
+}
+
+/** Locate one file inside a ZIP archive and return its raw bytes.
+ *
+ *  DOCX (and XLSX, EPUB) are ZIPs, so pulling `word/document.xml` out is
+ *  the whole trick. Walks the central directory rather than scanning for
+ *  local headers, since only the directory is authoritative. */
+export function findZipEntry(
+  bytes: Uint8Array,
+  name: string,
+): ZipEntry | null {
+  // End of central directory: signature 0x06054b50, within the last 64KB.
+  let eocd = -1;
+  const min = Math.max(0, bytes.length - 65_557);
+  for (let i = bytes.length - 22; i >= min; i--) {
+    if (u32(bytes, i) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd === -1) return null;
+
+  const count = u16(bytes, eocd + 10);
+  let p = u32(bytes, eocd + 16); // offset of central directory
+
+  for (let n = 0; n < count; n++) {
+    if (u32(bytes, p) !== 0x02014b50) return null;
+    const method = u16(bytes, p + 10);
+    const compressedSize = u32(bytes, p + 20);
+    const nameLen = u16(bytes, p + 28);
+    const extraLen = u16(bytes, p + 30);
+    const commentLen = u16(bytes, p + 32);
+    const localOffset = u32(bytes, p + 42);
+    const entryName = new TextDecoder().decode(
+      bytes.subarray(p + 46, p + 46 + nameLen),
+    );
+
+    if (entryName === name) {
+      // The local header repeats the name and extra fields, and its
+      // extra length can differ from the central directory's.
+      if (u32(bytes, localOffset) !== 0x04034b50) return null;
+      const lNameLen = u16(bytes, localOffset + 26);
+      const lExtraLen = u16(bytes, localOffset + 28);
+      const start = localOffset + 30 + lNameLen + lExtraLen;
+      return {
+        method,
+        data: bytes.subarray(start, start + compressedSize),
+      };
+    }
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  return null;
+}
+
+/** Every file name in a ZIP's central directory. */
+export function listZipEntries(bytes: Uint8Array): string[] {
+  let eocd = -1;
+  const min = Math.max(0, bytes.length - 65_557);
+  for (let i = bytes.length - 22; i >= min; i--) {
+    if (u32(bytes, i) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd === -1) return [];
+  const count = u16(bytes, eocd + 10);
+  let p = u32(bytes, eocd + 16);
+  const names: string[] = [];
+  for (let n = 0; n < count; n++) {
+    if (u32(bytes, p) !== 0x02014b50) break;
+    const nameLen = u16(bytes, p + 28);
+    names.push(
+      new TextDecoder().decode(bytes.subarray(p + 46, p + 46 + nameLen)),
+    );
+    p += 46 + nameLen + u16(bytes, p + 30) + u16(bytes, p + 32);
+  }
+  return names;
+}
+
+/** The DOCX parts that carry body text, in reading order. Headers and
+ *  footers repeat per section, and footnotes live apart from the body —
+ *  reading only document.xml silently drops all of it. */
+export function docxTextParts(names: string[]): string[] {
+  const ordered: string[] = [];
+  if (names.includes("word/document.xml")) ordered.push("word/document.xml");
+  const extras = names
+    .filter((n) =>
+      /^word\/(header\d*|footer\d*|footnotes|endnotes)\.xml$/.test(n),
+    )
+    .sort();
+  return [...ordered, ...extras];
+}
+
+/** Turn WordprocessingML into plain text.
+ *
+ *  Only the pieces that carry meaning: `w:t` runs are text, `w:p` ends a
+ *  paragraph, `w:br`/`w:cr` break lines, and `w:tab` is a tab. Styling,
+ *  revision history, and comments are dropped. */
+export function docxTextFromXml(xml: string): string {
+  // Body only — headers, footers, and footnotes live in other parts.
+  const body = xml.replace(/<w:instrText[\s\S]*?<\/w:instrText>/g, "");
+  let out = "";
+  const token =
+    /<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>|<w:tab\b[^>]*\/?>|<w:br\b[^>]*\/?>|<w:cr\b[^>]*\/?>|<\/w:p>/g;
+  let m: RegExpExecArray | null;
+  while ((m = token.exec(body)) !== null) {
+    if (m[1] !== undefined) {
+      out += m[1]
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'")
+        .replace(/&amp;/g, "&");
+    } else if (m[0].startsWith("<w:tab")) {
+      out += "\t";
+    } else if (m[0].startsWith("<w:br") || m[0].startsWith("<w:cr")) {
+      out += "\n";
+    } else {
+      out += "\n";
+    }
+  }
+  // Collapse the runs of blank lines that empty paragraphs leave behind.
+  return out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/** Decode a PDF literal string, honouring backslash escapes and the
+ *  three-digit octal form. */
+export function decodePdfString(raw: string): string {
+  let out = "";
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (c !== "\\") {
+      out += c;
+      continue;
+    }
+    const next = raw[++i];
+    if (next === undefined) break;
+    const simple: Record<string, string> = {
+      n: "\n",
+      r: "\r",
+      t: "\t",
+      b: "\b",
+      f: "\f",
+      "(": "(",
+      ")": ")",
+      "\\": "\\",
+    };
+    if (next in simple) {
+      out += simple[next];
+    } else if (next >= "0" && next <= "7") {
+      let oct = next;
+      while (oct.length < 3 && raw[i + 1] >= "0" && raw[i + 1] <= "7") {
+        oct += raw[++i];
+      }
+      out += String.fromCharCode(Number.parseInt(oct, 8));
+    } else if (next === "\n") {
+      // Line continuation: emit nothing.
+    } else {
+      out += next;
+    }
+  }
+  return out;
+}
+
+/** Pull readable text out of a decoded PDF content stream.
+ *
+ *  Handles the common text operators — `Tj`, `'`, `"` and the `TJ`
+ *  array form — plus `Td`/`TD`/`T*` as line breaks. This is a pragmatic
+ *  extractor, not a layout engine: it recovers prose from PDFs whose
+ *  text is stored as text, and cannot help with scanned pages or fonts
+ *  using custom encodings. */
+export function pdfTextFromContent(content: string): string {
+  let out = "";
+  const token = /\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]*>|\bT[jJ*dD]|\bTf|'|"/g;
+  let pending: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = token.exec(content)) !== null) {
+    const t = m[0];
+    if (t.startsWith("(")) {
+      pending.push(decodePdfString(t.slice(1, -1)));
+    } else if (t.startsWith("<") && !t.startsWith("<<")) {
+      // Hex string: pairs of hex digits, one byte each.
+      const hex = t.slice(1, -1).replace(/\s+/g, "");
+      let s = "";
+      for (let i = 0; i + 1 < hex.length; i += 2) {
+        s += String.fromCharCode(Number.parseInt(hex.slice(i, i + 2), 16));
+      }
+      pending.push(s);
+    } else if (t === "Tj" || t === "TJ" || t === "'" || t === '"') {
+      out += pending.join("");
+      pending = [];
+      if (t === "'" || t === '"') out += "\n";
+    } else if (t === "T*" || t === "Td" || t === "TD") {
+      out += pending.join("");
+      pending = [];
+      out += "\n";
+    }
+  }
+  out += pending.join("");
+  return out
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 // ----------------------------------------------------------- search
 
 export interface SearchSource {
