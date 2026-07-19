@@ -1,6 +1,6 @@
 {
   "name": "hephaestus-4-obsidian",
-  "version": "0.8.0",
+  "version": "0.8.267",
   "description": "Hephaestus stripped down to an Obsidian plugin: local model chat in your vault",
   "main": "main.js",
   "scripts": {

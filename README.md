@@ -7,7 +7,7 @@
 <p align="center"><em>Chat with your AI in Obsidian.</em></p>
 
 <p align="center">
-  <strong>0.8.0 — BETA.</strong> Usable daily, but the interface and the
+  <strong>0.8.267 — BETA.</strong> Usable daily, but the interface and the
   stored data format may still change between releases.
 </p>
 
