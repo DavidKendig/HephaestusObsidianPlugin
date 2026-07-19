@@ -1,0 +1,17 @@
+node_modules/
+main.js
+*.map
+.DS_Store
+
+# Plugin runtime state: conversations + settings, written by Obsidian into
+# whichever folder it loads the plugin from. The vault's plugin folder is a
+# junction to this repo, so this file lands here — it is the user's private
+# chat history, not source.
+data.json
+
+# Attached images, written next to data.json by the running plugin.
+# The vault's plugin folder is a junction to this repo, so they land here.
+attachments/
+
+# Test build of src/lib.ts
+dist/

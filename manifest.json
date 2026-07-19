@@ -1,0 +1,9 @@
+{
+  "id": "hephaestus",
+  "name": "Hephaestus",
+  "version": "0.8.0",
+  "minAppVersion": "1.4.0",
+  "description": "Chat with local models (Ollama or LM Studio) inside your vault, with attachments, web search, and note integration.",
+  "author": "David Kendig",
+  "isDesktopOnly": true
+}

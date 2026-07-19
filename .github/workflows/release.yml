@@ -1,0 +1,73 @@
+name: Release
+
+# Tag a version to publish it:
+#
+#   npm version 0.2.1 --no-git-tag-version   # updates package.json
+#   # bump "version" in manifest.json and add it to versions.json
+#   git commit -am "Release 0.2.1" && git tag 0.2.1 && git push --tags
+#
+# Obsidian expects bare version tags ("0.2.1"), not "v0.2.1".
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Test and build
+        run: |
+          npm test
+          npm run build
+
+      - name: Check the tag matches manifest.json
+        # A release whose manifest disagrees with its tag installs as the
+        # wrong version and never updates cleanly, so fail loudly here.
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          MANIFEST=$(node -p "require('./manifest.json').version")
+          echo "tag=$TAG manifest=$MANIFEST"
+          if [ "$TAG" != "$MANIFEST" ]; then
+            echo "::error::Tag $TAG does not match manifest.json version $MANIFEST"
+            exit 1
+          fi
+          if ! node -p "require('./versions.json')['$TAG']" >/dev/null 2>&1; then
+            echo "::error::versions.json has no entry for $TAG"
+            exit 1
+          fi
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # Anything below 1.0.0 ships as a GitHub prerelease, so it is
+          # labelled BETA in the UI and never served as "latest".
+          FLAGS=""
+          TITLE="$TAG"
+          case "$TAG" in
+            0.*) FLAGS="--prerelease"; TITLE="$TAG BETA" ;;
+          esac
+          # main.js is a build artifact and is gitignored, so it only
+          # reaches users by being attached here.
+          gh release create "$TAG" \
+            --title "$TITLE" \
+            --generate-notes \
+            $FLAGS \
+            main.js manifest.json styles.css

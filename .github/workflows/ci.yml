@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The plugin shells out to platform-specific tools for hardware
+        # detection, so it is worth proving the build and tests pass on
+        # all three desktop targets.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check and bundle
+        run: npm run build
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Check the bundle loads
+        # Minification can break module structure in ways type-checking
+        # cannot see, so require the built file with the Obsidian API
+        # stubbed and confirm the plugin class survives.
+        shell: bash
+        run: |
+          cat > smoke.cjs <<'EOF'
+          const Module = require("module");
+          const origLoad = Module._load;
+          class Fake { constructor() {} addClass() {} createDiv() { return new Fake(); } }
+          const stub = new Proxy({}, { get: () => Fake });
+          Module._load = function (request, ...rest) {
+            if (request === "obsidian" || request === "electron") return stub;
+            return origLoad.call(this, request, ...rest);
+          };
+          const mod = require("./main.js");
+          const Plugin = mod.default ?? mod;
+          if (typeof Plugin !== "function") throw new Error("bundle did not export a plugin class");
+          for (const method of ["onload", "chat", "hardware", "modelInfo"]) {
+            if (typeof Plugin.prototype[method] !== "function") {
+              throw new Error("missing method after bundling: " + method);
+            }
+          }
+          console.log("bundle OK");
+          EOF
+          node smoke.cjs

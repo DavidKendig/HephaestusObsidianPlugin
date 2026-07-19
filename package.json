@@ -1,0 +1,19 @@
+{
+  "name": "hephaestus-4-obsidian",
+  "version": "0.8.0",
+  "description": "Hephaestus stripped down to an Obsidian plugin: local model chat in your vault",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "test": "node esbuild.lib.mjs && node --test \"tests/*.test.mjs\""
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.21.0",
+    "obsidian": "latest",
+    "typescript": "^5.4.0"
+  },
+  "license": "Apache-2.0"
+}

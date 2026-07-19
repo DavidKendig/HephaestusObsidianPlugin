@@ -1,0 +1,620 @@
+.heph-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0;
+}
+
+.heph-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 8px 6px;
+}
+
+.heph-conv-row {
+  padding: 0 8px 8px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.heph-conv {
+  width: 100%;
+  min-width: 0;
+}
+
+/* The file <input> exists only to open the OS picker. */
+.heph-hidden-input {
+  display: none;
+}
+
+.heph-rename-input {
+  width: 100%;
+  margin-bottom: 12px;
+}
+
+.heph-model {
+  flex: 1;
+  min-width: 0;
+}
+
+.heph-new {
+  white-space: nowrap;
+}
+
+.heph-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.heph-empty {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 24px 16px;
+}
+
+.heph-empty-logo {
+  display: flex;
+}
+
+.heph-empty-logo svg {
+  width: 56px;
+  height: auto;
+  opacity: 0.9;
+}
+
+.heph-empty-text {
+  font-size: var(--font-ui-medium);
+}
+
+.heph-msg {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.heph-msg.user {
+  align-self: flex-end;
+  max-width: 85%;
+}
+
+/* Controls sit left of a user bubble, right of an assistant reply, so
+   they never hang off the pane edge. */
+.heph-msg.user .heph-msg-actions {
+  order: -1;
+}
+
+.heph-msg.assistant .heph-msg-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.heph-msg-actions {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 100ms ease-in-out;
+}
+
+.heph-msg:hover .heph-msg-actions,
+.heph-msg-actions:focus-within {
+  opacity: 1;
+}
+
+.heph-msg-action {
+  padding: 2px;
+  color: var(--text-faint);
+}
+
+.heph-msg-action:hover {
+  color: var(--text-normal);
+}
+
+.heph-msg-action:last-child:hover {
+  color: var(--text-error);
+}
+
+/* An editing row drops the bubble styling: the textarea is the message. */
+.heph-msg.editing {
+  align-self: stretch;
+  max-width: none;
+  width: 100%;
+}
+
+.heph-edit {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.heph-edit-area {
+  width: 100%;
+  resize: vertical;
+  min-height: 60px;
+  font-family: inherit;
+}
+
+.heph-edit-buttons {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.heph-msg.user .heph-msg-body {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  padding: 8px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.heph-msg.assistant {
+  align-self: stretch;
+}
+
+.heph-msg.assistant .heph-msg-body {
+  word-break: break-word;
+}
+
+.heph-msg.assistant .heph-msg-body > *:first-child {
+  margin-top: 0;
+}
+
+
+.heph-thinking {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 14px 0;
+}
+
+.heph-dots {
+  display: flex;
+  gap: 5px;
+}
+
+.heph-thinking-label {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.heph-thinking-label:empty {
+  display: none;
+}
+
+.heph-toggle {
+  color: var(--text-muted);
+  padding: 4px;
+}
+
+.heph-toggle.on {
+  color: var(--interactive-accent);
+  background: var(--background-modifier-hover);
+  border-radius: 6px;
+}
+
+.heph-dots span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  animation: heph-bounce 1.2s ease-in-out infinite;
+}
+
+.heph-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.heph-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes heph-bounce {
+  0%, 60%, 100% {
+    transform: translateY(0);
+    opacity: 0.35;
+  }
+  30% {
+    transform: translateY(-5px);
+    opacity: 1;
+  }
+}
+
+/* Context gauge: a ring that fills as the window fills, green → yellow
+   → red. Sized to match the icon buttons it sits beside. */
+/* Sizing comes from .heph-send-row .heph-toggle, shared with every other
+   button in the composer; only the gauge-specific bits live here. */
+.heph-dial {
+  gap: 4px;
+  cursor: pointer;
+}
+
+.heph-dial-svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+
+.heph-dial-track {
+  stroke: var(--background-modifier-border);
+}
+
+.heph-dial-arc {
+  transition: stroke-dashoffset 150ms ease-out, stroke 150ms ease-out;
+}
+
+.heph-dial.ok .heph-dial-arc {
+  stroke: var(--color-green);
+}
+
+.heph-dial.warn .heph-dial-arc {
+  stroke: var(--color-yellow);
+}
+
+.heph-dial.danger .heph-dial-arc {
+  stroke: var(--color-red);
+}
+
+.heph-dial.danger .heph-dial-label {
+  color: var(--color-red);
+}
+
+.heph-dial-label {
+  font-size: var(--font-ui-smaller);
+  font-variant-numeric: tabular-nums;
+}
+
+/* System / hardware panel in settings */
+.heph-hw {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 10px;
+}
+
+.heph-hw-loading {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  padding: 8px 0;
+}
+
+.heph-hw-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.heph-hw-icon {
+  display: flex;
+  flex: none;
+  color: var(--text-muted);
+  transform: translateY(3px);
+}
+
+.heph-hw-label {
+  flex: none;
+  width: 44px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.heph-hw-value {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  word-break: break-word;
+}
+
+.heph-hw-hint {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.heph-fit {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+}
+
+.heph-fit-icon {
+  display: flex;
+  flex: none;
+  transform: translateY(2px);
+}
+
+.heph-fit.ok {
+  border-color: var(--color-green);
+}
+
+.heph-fit.ok .heph-fit-icon {
+  color: var(--color-green);
+}
+
+.heph-fit.warn {
+  border-color: var(--color-yellow);
+}
+
+.heph-fit.warn .heph-fit-icon {
+  color: var(--color-yellow);
+}
+
+.heph-fit.danger {
+  border-color: var(--color-red);
+}
+
+.heph-fit.danger .heph-fit-icon {
+  color: var(--color-red);
+}
+
+.heph-fit-title {
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.heph-fit-text {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+/* Context breakdown dialog */
+.heph-ctx-head {
+  text-align: center;
+  margin-bottom: 10px;
+}
+
+.heph-ctx-pct {
+  font-size: 2.4em;
+  font-weight: 600;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.heph-ctx-head.ok .heph-ctx-pct {
+  color: var(--color-green);
+}
+
+.heph-ctx-head.warn .heph-ctx-pct {
+  color: var(--color-yellow);
+}
+
+.heph-ctx-head.danger .heph-ctx-pct {
+  color: var(--color-red);
+}
+
+.heph-ctx-sub {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.heph-ctx-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--background-modifier-border);
+  overflow: hidden;
+  margin-bottom: 14px;
+}
+
+.heph-ctx-fill {
+  height: 100%;
+  transition: width 150ms ease-out;
+}
+
+.heph-ctx-bar.ok .heph-ctx-fill {
+  background: var(--color-green);
+}
+
+.heph-ctx-bar.warn .heph-ctx-fill {
+  background: var(--color-yellow);
+}
+
+.heph-ctx-bar.danger .heph-ctx-fill {
+  background: var(--color-red);
+}
+
+.heph-ctx-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-ui-small);
+}
+
+.heph-ctx-table td {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+  vertical-align: top;
+}
+
+.heph-ctx-num {
+  text-align: right;
+  white-space: nowrap;
+  padding-left: 10px !important;
+  font-variant-numeric: tabular-nums;
+}
+
+.heph-ctx-hint {
+  padding-left: 10px !important;
+  color: var(--text-muted);
+}
+
+.heph-ctx-note {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--color-yellow);
+  background: var(--background-modifier-message);
+  font-size: var(--font-ui-small);
+}
+
+.heph-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--color-yellow);
+  border-radius: var(--radius-s);
+  background: var(--background-modifier-message);
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.heph-warning-icon {
+  display: flex;
+  flex: none;
+  color: var(--color-yellow);
+}
+
+/* The exact text a model wants to write, shown before it lands. */
+.heph-confirm-preview {
+  max-height: 40vh;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: var(--font-ui-small);
+}
+
+.heph-pending {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0 8px;
+}
+
+.heph-pending:empty {
+  display: none;
+}
+
+.heph-pending:not(:empty) {
+  padding-top: 8px;
+}
+
+.heph-msg-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.heph-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 4px 2px 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  font-size: var(--font-ui-smaller);
+}
+
+.heph-chip-icon {
+  display: flex;
+  flex: none;
+  color: var(--text-muted);
+}
+
+.heph-chip-icon .svg-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.heph-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.heph-chip-x {
+  flex: none;
+  padding: 0;
+  color: var(--text-muted);
+}
+
+.heph-chip-x .svg-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.heph-msg-text:empty {
+  display: none;
+}
+
+.heph-composer {
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  border-top: 1px solid var(--background-modifier-border);
+  align-items: stretch;
+}
+
+/* Input stretches to the send column's height: Send + the button row
+   stacked beneath it. */
+.heph-input {
+  flex: 1;
+  resize: none;
+  min-height: 0;
+  height: auto;
+  padding-top: 6px;
+  padding-bottom: 6px;
+  overflow-y: auto;
+}
+
+.heph-send-col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Send spans the full width of the two buttons beneath it */
+.heph-send {
+  width: 100%;
+  height: 32px;
+  white-space: nowrap;
+}
+
+.heph-send-row {
+  display: flex;
+  gap: 4px;
+}
+
+/* Every control in these rows is the same box: equal width, 32px tall,
+   contents centred. Applied to the row's children as a group so a new
+   control cannot quietly opt out and break the grid. */
+.heph-send-row > * {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 32px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  margin: 0;
+}
