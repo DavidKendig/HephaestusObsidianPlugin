@@ -89,6 +89,10 @@ interface HephSettings {
   contextTokens: number;
   /** Read the context window from the model instead of the setting. */
   autoContext: boolean;
+  /** Layers to place on the GPU, or -1 to let the server decide. An
+   *  escape hatch for when its own estimate overcommits video memory,
+   *  not a knob with a better default than "auto". */
+  gpuLayers: number;
   /** Which web-search backend to use. */
   searchProvider: SearchProvider;
   /** Base URL of a self-hosted SearXNG instance. */
@@ -124,6 +128,7 @@ const DEFAULT_DATA: HephData = {
     confirmWrites: true,
     contextTokens: 8192,
     autoContext: true,
+    gpuLayers: -1,
     searchProvider: "duckduckgo",
     searxngUrl: "",
     braveKey: "",
@@ -795,14 +800,22 @@ export default class HephaestusPlugin extends Plugin {
     // here are working to — so a request trimmed to fit 20k tokens was
     // still being truncated to the server default on arrival, quietly,
     // with the dropped tokens never reaching the model.
-    const numCtx = this.data.settings.contextTokens;
+    const { contextTokens, gpuLayers } = this.data.settings;
+    const options: Record<string, number> = {};
+    if (contextTokens > 0) options.num_ctx = contextTokens;
+    // -1 is "let the server decide", which is both the default and the
+    // right answer nearly always. A manual value is only useful when its
+    // estimate overcommits — and 0 is meaningful (pure CPU), so this
+    // tests the sentinel rather than truthiness.
+    if (gpuLayers >= 0) options.num_gpu = gpuLayers;
+
     const payload = (stream: boolean) =>
       JSON.stringify({
         model,
         stream,
         ...(think ? { think: true } : {}),
         ...(withTools ? { tools: [WRITE_TOOL] } : {}),
-        ...(numCtx > 0 ? { options: { num_ctx: numCtx } } : {}),
+        ...(Object.keys(options).length ? { options } : {}),
         messages: raw,
       });
 
@@ -2817,6 +2830,39 @@ class HephSettingTab extends PluginSettingTab {
             this.plugin.refreshViews();
           });
       });
+
+    // Ollama decides the split itself and is usually right. This exists
+    // for the case it is not: on Windows the NVIDIA driver will let a
+    // process overcommit video memory and page it through system RAM,
+    // which thrashes over PCIe and is far slower than a clean CPU
+    // offload. Forcing fewer layers can be a large win there.
+    if (this.plugin.apiKind() === "ollama") {
+      new Setting(containerEl)
+        .setName("GPU layers")
+        .setDesc(
+          "How many model layers to put on the GPU. Leave empty for" +
+            " automatic, which is almost always right. Set a number only" +
+            " if a model that nearly fits runs far slower than the GPU" +
+            " share in the context pane suggests — that points at the" +
+            " driver paging video memory, and capping the layers below" +
+            " what fits avoids it. 0 runs entirely on the CPU.",
+        )
+        .addText((text) => {
+          text
+            .setPlaceholder("auto")
+            .setValue(s.gpuLayers >= 0 ? String(s.gpuLayers) : "")
+            .onChange(async (value) => {
+              const raw = value.trim();
+              const n = Number.parseInt(raw, 10);
+              // Anything unparseable means auto rather than an error:
+              // this field is reached by people already troubleshooting,
+              // and a rejected value they cannot see is worse than a
+              // documented fallback.
+              s.gpuLayers = raw && Number.isFinite(n) && n >= 0 ? n : -1;
+              await this.plugin.persist();
+            });
+        });
+    }
 
     new Setting(containerEl)
       .setName("Let the AI read the active note")

@@ -154,6 +154,19 @@ There is no equivalent on the OpenAI-compatible path: LM Studio and
 friends take the context length from how the model was loaded, not from
 the request.
 
+### GPU layers
+
+**Leave this on automatic.** Ollama decides how much of a model to place
+on the GPU and is usually right, and the field is empty by default.
+
+It exists for the case where it is not. On Windows the NVIDIA driver
+will let a process overcommit video memory and page the excess through
+system RAM, which thrashes over PCIe and is far slower than a clean CPU
+offload — the difference between "slow" and "apparently frozen". The
+symptom is a model performing much worse than the GPU share in the
+context pane suggests it should. Capping the layers below what fits
+sidesteps it. `0` runs entirely on the CPU. Ollama only.
+
 Token counts are estimated at ~4 characters per token, and images are
 counted at a flat 800. Both are approximations meant to drive a gauge,
 not to match your model's tokenizer exactly.
