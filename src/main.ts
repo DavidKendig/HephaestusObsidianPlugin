@@ -22,6 +22,7 @@ import {
   Attachment,
   ChatMessage,
   Hardware,
+  LoadedModel,
   ModelInfo,
   SearchProvider,
   SearchSource,
@@ -42,7 +43,9 @@ import {
   parseBrave,
   parseLmStudioModels,
   parseLspci,
+  offloadVerdict,
   parseNvidiaSmi,
+  parseOllamaPs,
   parseOllamaShow,
   parseSearxng,
   pdfTextFromContent,
@@ -80,7 +83,9 @@ interface HephSettings {
   readNote: boolean;
   /** Ask before the model writes into a note. */
   confirmWrites: boolean;
-  /** Context window in tokens, used for the usage gauge and trimming. */
+  /** Context window in tokens. Drives the usage gauge and trimming, and
+   *  is sent to Ollama as num_ctx — so it also costs video memory, since
+   *  the KV cache scales with it. */
   contextTokens: number;
   /** Read the context window from the model instead of the setting. */
   autoContext: boolean;
@@ -282,6 +287,7 @@ export default class HephaestusPlugin extends Plugin {
       ramFree: os.freemem(),
       gpu: null,
       vram: null,
+      vramUsed: null,
       unified: false,
       platform: process.platform,
     };
@@ -303,6 +309,7 @@ export default class HephaestusPlugin extends Plugin {
       if (smi) {
         hw.gpu = smi.name;
         hw.vram = smi.vram;
+        hw.vramUsed = smi.vramUsed;
       }
     }
 
@@ -381,13 +388,20 @@ export default class HephaestusPlugin extends Plugin {
 
   /** NVIDIA probe for Windows and Linux; the only source that reports
    *  real VRAM on those platforms. */
-  private runNvidiaSmi(): Promise<{ name: string; vram: number } | null> {
+  private runNvidiaSmi(): Promise<{
+    name: string;
+    vram: number;
+    vramUsed: number | null;
+  } | null> {
     return new Promise((resolve) => {
       try {
         // execFile, not exec: fixed argument list, no shell involved.
         execFile(
           "nvidia-smi",
-          ["--query-gpu=name,memory.total", "--format=csv,noheader"],
+          [
+            "--query-gpu=name,memory.total,memory.used",
+            "--format=csv,noheader",
+          ],
           { timeout: 3000, windowsHide: true },
           (err, stdout) => {
             resolve(err ? null : parseNvidiaSmi(String(stdout)));
@@ -397,6 +411,32 @@ export default class HephaestusPlugin extends Plugin {
         resolve(null);
       }
     });
+  }
+
+  /** A fresh video-memory reading, bypassing the hardware cache.
+   *
+   *  Total VRAM never changes and is cached; how much is *in use* changes
+   *  by the second, so a cached value would be worse than none. Only
+   *  NVIDIA reports this — elsewhere the caller gets null and says so. */
+  async liveVram(): Promise<{ total: number; used: number } | null> {
+    const smi = await this.runNvidiaSmi();
+    if (!smi || smi.vramUsed === null) return null;
+    return { total: smi.vram, used: smi.vramUsed };
+  }
+
+  /** What the server currently holds in memory, and how much of it sits
+   *  on the GPU. Ollama only: there is no /api/ps equivalent in the
+   *  OpenAI-compatible shape. */
+  async loadedModels(): Promise<LoadedModel[]> {
+    if (this.apiKind() !== "ollama") return [];
+    try {
+      const resp = await requestUrl({ url: `${this.baseUrl()}/api/ps` });
+      return parseOllamaPs(resp.json);
+    } catch {
+      // Server down or too old for /api/ps — not worth an error here,
+      // the panel simply omits the section.
+      return [];
+    }
   }
 
   /** GPU name via WebGL's unmasked renderer string. */
@@ -750,12 +790,19 @@ export default class HephaestusPlugin extends Plugin {
       );
     }
     const url = `${this.baseUrl()}/api/chat`;
+    // num_ctx has to be sent, not assumed. Without it Ollama serves its
+    // own default window regardless of what the gauge and the trimmer
+    // here are working to — so a request trimmed to fit 20k tokens was
+    // still being truncated to the server default on arrival, quietly,
+    // with the dropped tokens never reaching the model.
+    const numCtx = this.data.settings.contextTokens;
     const payload = (stream: boolean) =>
       JSON.stringify({
         model,
         stream,
         ...(think ? { think: true } : {}),
         ...(withTools ? { tools: [WRITE_TOOL] } : {}),
+        ...(numCtx > 0 ? { options: { num_ctx: numCtx } } : {}),
         messages: raw,
       });
 
@@ -1067,6 +1114,13 @@ class ContextModal extends Modal {
     messages: number;
     images: number;
     noteName: string | null;
+    /** Shells out to nvidia-smi and queries the server, so it runs
+     *  after the token table is already on screen. */
+    probe: () => Promise<{
+      vram: { total: number; used: number } | null;
+      loaded: LoadedModel[];
+      gpu: string | null;
+    }>;
   };
 
   constructor(app: App, info: ContextModal["info"]) {
@@ -1138,6 +1192,91 @@ class ContextModal extends Modal {
         " model where the server reports it; change it under Settings →" +
         " Community plugins → Hephaestus.",
     });
+
+    // Video memory is the other half of "why is this slow": the context
+    // window can be nowhere near full while the model is spilling onto
+    // the CPU and crawling.
+    const gpuEl = this.contentEl.createDiv({ cls: "heph-ctx-gpu" });
+    gpuEl.createEl("h4", { text: "GPU memory" });
+    gpuEl.createDiv({ cls: "heph-ctx-hint", text: "Checking…" });
+    void this.renderGpu(gpuEl);
+  }
+
+  /** Fill in the GPU section once the probes come back. */
+  private async renderGpu(el: HTMLElement) {
+    let result: Awaited<ReturnType<ContextModal["info"]["probe"]>>;
+    try {
+      result = await this.info.probe();
+    } catch {
+      el.empty();
+      el.createEl("h4", { text: "GPU memory" });
+      el.createDiv({ cls: "heph-ctx-hint", text: "Could not be read." });
+      return;
+    }
+    // The modal may have been closed while the probe was in flight.
+    if (!el.isConnected) return;
+
+    const { vram, loaded, gpu } = result;
+    el.empty();
+    el.createEl("h4", { text: "GPU memory" });
+
+    if (vram) {
+      const ratio = vram.used / vram.total;
+      const pct = Math.round(ratio * 100);
+      // Video memory behaves unlike the context window: it is shared
+      // with the desktop and every other app, and a card sitting at 95%
+      // is the normal state of a model that fits. Only near-full with a
+      // spilled model is a problem, and the offload line says that
+      // outright, so this bar stays neutral rather than alarming.
+      const bar = el.createDiv({ cls: "heph-ctx-bar ok" });
+      bar.createDiv({ cls: "heph-ctx-fill" }).style.width =
+        `${Math.min(pct, 100)}%`;
+      el.createDiv({
+        cls: "heph-ctx-sub",
+        text:
+          `${formatBytes(vram.used)} of ${formatBytes(vram.total)} in use` +
+          ` (${pct}%)${gpu ? ` — ${gpu}` : ""}`,
+      });
+      el.createDiv({
+        cls: "heph-ctx-hint",
+        text: "Card-wide, including your desktop and other apps.",
+      });
+    } else {
+      el.createDiv({
+        cls: "heph-ctx-hint",
+        text: gpu
+          ? `${gpu} — live VRAM readings need nvidia-smi, so usage is` +
+            " unavailable on this card."
+          : "No GPU detected, or nvidia-smi is unavailable.",
+      });
+    }
+
+    if (loaded.length === 0) return;
+
+    const table = el.createEl("table", { cls: "heph-ctx-table" });
+    for (const m of loaded) {
+      const v = offloadVerdict(m);
+      const tr = table.createEl("tr");
+      tr.createEl("td", { text: m.name });
+      tr.createEl("td", {
+        cls: `heph-ctx-num heph-fit-${v.level}`,
+        text: `${Math.round(v.ratio * 100)}% GPU`,
+      });
+      tr.createEl("td", { cls: "heph-ctx-hint", text: v.text });
+    }
+
+    // The actionable half. Without this the numbers just say "slow".
+    if (loaded.some((m) => offloadVerdict(m).level !== "ok")) {
+      el.createEl("p", {
+        cls: "heph-ctx-note",
+        text:
+          "A model that does not fit in video memory is split with the" +
+          " CPU, which is what a stalled-looking reply usually is. Use a" +
+          " smaller model or a tighter quantisation, lower the context" +
+          " window (the KV cache grows with it), or close other GPU" +
+          " applications and load the model again.",
+      });
+    }
   }
 
   onClose() {
@@ -1914,6 +2053,14 @@ class ChatView extends ItemView {
       messages: this.conv?.messages.length ?? 0,
       images,
       noteName: reading ? (note?.basename ?? null) : null,
+      probe: async () => {
+        const [vram, loaded, hw] = await Promise.all([
+          this.plugin.liveVram(),
+          this.plugin.loadedModels(),
+          this.plugin.hardware(),
+        ]);
+        return { vram, loaded, gpu: hw.gpu };
+      },
     }).open();
   }
 
@@ -2650,11 +2797,13 @@ class HephSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Context window (tokens)")
       .setDesc(
-        s.autoContext
+        (s.autoContext
           ? "Detected from the selected model. Turn off auto-detect to" +
-              " override."
-          : "Used by the gauge and to trim old messages before a request" +
-              " overflows. Match your model's real context length.",
+              " override. "
+          : "Used by the gauge, to trim old messages before a request" +
+              " overflows, and sent to the server as the window to use. ") +
+          "Costs video memory: the KV cache grows with this number, so" +
+          " lowering it can be what makes a large model fit on the GPU.",
       )
       .addText((text) => {
         text

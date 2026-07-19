@@ -460,6 +460,34 @@
   color: var(--text-muted);
 }
 
+.heph-ctx-gpu {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.heph-ctx-gpu h4 {
+  margin: 0 0 8px;
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Offload percentage in the loaded-model table. Colour carries the
+   warning here, so it is paired with the wording in the same row. */
+.heph-fit-ok {
+  color: var(--color-green);
+}
+
+.heph-fit-warn {
+  color: var(--color-yellow);
+}
+
+.heph-fit-danger {
+  color: var(--color-red);
+}
+
 .heph-ctx-note {
   margin-top: 12px;
   padding: 8px 10px;
