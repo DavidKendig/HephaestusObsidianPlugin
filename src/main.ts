@@ -31,6 +31,11 @@ import {
   clampContext,
   fitVerdict,
   formatBytes,
+  docxTextFromXml,
+  docxTextParts,
+  findZipEntry,
+  listZipEntries,
+  inflateRaw,
   isBinary,
   normalizeUrl,
   pageLabel,
@@ -40,6 +45,7 @@ import {
   parseNvidiaSmi,
   parseOllamaShow,
   parseSearxng,
+  pdfTextFromContent,
   parseSystemProfiler,
   parseSSELine,
   parseToolCalls,
@@ -1958,7 +1964,7 @@ class ChatView extends ItemView {
     );
     menu.addItem((i) =>
       i
-        .setTitle("File from computer…")
+        .setTitle("File, PDF or Word doc…")
         .setIcon("file")
         .onClick(() => this.pickFromDisk("", "file")),
     );
@@ -2003,7 +2009,7 @@ class ChatView extends ItemView {
     input.onchange = async () => {
       for (const file of Array.from(input.files ?? [])) {
         const buf = await file.arrayBuffer();
-        this.stage(file.name, new Uint8Array(buf), kind);
+        await this.stage(file.name, new Uint8Array(buf), kind);
       }
       input.remove();
       this.renderPending();
@@ -2047,19 +2053,117 @@ class ChatView extends ItemView {
     const kind = ChatView.IMAGE_EXT.includes(file.extension.toLowerCase())
       ? "image"
       : "file";
-    this.stage(file.name, bytes, kind);
+    await this.stage(file.name, bytes, kind);
     this.renderPending();
   }
 
+  /** Formats we can extract text from, beyond plain text files. */
+  private static readonly DOC_EXT = ["docx", "pdf"];
+
+  /** Extract text from a document format, or null when it is not one we
+   *  handle. DOCX is a ZIP of XML; PDF is parsed for text-showing
+   *  operators. Both are best-effort. */
+  private async extractDocument(
+    name: string,
+    bytes: Uint8Array,
+  ): Promise<string | null> {
+    const ext = name.split(".").pop()?.toLowerCase() ?? "";
+    try {
+      if (ext === "docx") {
+        // Body first, then headers, footers, and notes — reading only
+        // document.xml silently drops whatever lives in those.
+        const parts = docxTextParts(listZipEntries(bytes));
+        if (parts.length === 0) return null;
+        const chunks: string[] = [];
+        for (const part of parts) {
+          const entry = findZipEntry(bytes, part);
+          if (!entry) continue;
+          const xml =
+            entry.method === 8
+              ? new TextDecoder().decode(await inflateRaw(entry.data))
+              : new TextDecoder().decode(entry.data);
+          const text = docxTextFromXml(xml);
+          if (text.trim()) chunks.push(text);
+        }
+        return chunks.join("\n\n");
+      }
+      if (ext === "pdf") {
+        return await this.extractPdf(bytes);
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  /** Walk a PDF's stream objects, inflating the compressed ones, and
+   *  collect their text. Deliberately simple: it recovers prose from
+   *  PDFs that store text as text, and cannot read scanned pages. */
+  private async extractPdf(bytes: Uint8Array): Promise<string> {
+    // Latin1 keeps byte values intact so stream offsets stay correct.
+    const raw = new TextDecoder("latin1").decode(bytes);
+    const chunks: string[] = [];
+    const re = /stream\r?\n?/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(raw)) !== null) {
+      const start = m.index + m[0].length;
+      const end = raw.indexOf("endstream", start);
+      if (end === -1) continue;
+      const header = raw.slice(Math.max(0, m.index - 400), m.index);
+      const body = raw.slice(start, end);
+      if (/\/FlateDecode/.test(header)) {
+        try {
+          const packed = Uint8Array.from(body, (c) => c.charCodeAt(0) & 0xff);
+          // Skip the 2-byte zlib header; PDF streams are zlib-wrapped.
+          const inflated = await inflateRaw(packed.subarray(2));
+          chunks.push(new TextDecoder("latin1").decode(inflated));
+        } catch {
+          // Encrypted, damaged, or an image stream — skip it.
+        }
+      } else if (/\/Length/.test(header) && !/\/Image/.test(header)) {
+        chunks.push(body);
+      }
+      re.lastIndex = end;
+    }
+    return chunks.map((c) => pdfTextFromContent(c)).join("\n").trim();
+  }
+
   /** Turn raw bytes into a staged attachment, rejecting binaries we
-   *  cannot represent as either an image or text. */
-  private stage(name: string, bytes: Uint8Array, kind: "image" | "file") {
+   *  cannot represent as an image, a document, or text. */
+  private async stage(
+    name: string,
+    bytes: Uint8Array,
+    kind: "image" | "file",
+  ) {
     if (kind === "image") {
       this.pending.push({ name, kind: "image", bytes });
       return;
     }
+    const ext = name.split(".").pop()?.toLowerCase() ?? "";
+    if (ChatView.DOC_EXT.includes(ext)) {
+      const extracted = await this.extractDocument(name, bytes);
+      if (extracted && extracted.trim()) {
+        this.pending.push({
+          name,
+          kind: "file",
+          text:
+            extracted.length > ChatView.MAX_TEXT
+              ? extracted.slice(0, ChatView.MAX_TEXT) + "\n… [truncated]"
+              : extracted,
+        });
+        return;
+      }
+      new Notice(
+        `Hephaestus: could not read text from ${name}` +
+          (ext === "pdf"
+            ? " — scanned PDFs need OCR, which this plugin does not do"
+            : ""),
+        8000,
+      );
+      return;
+    }
     const text = new TextDecoder().decode(bytes);
-    // A NUL byte in the first chunk means this is not text (PDF, zip, …).
+    // A NUL byte in the first chunk means this is not text (zip, exe, …).
     if (isBinary(text)) {
       new Notice(
         `Hephaestus: ${name} is not a text file — only images and text` +
