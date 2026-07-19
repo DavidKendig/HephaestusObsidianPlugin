@@ -2,6 +2,71 @@
 
 Context for anyone (human or model) picking this codebase up mid-stream.
 
+## The Bonsai provider
+
+`provider: "bonsai"` talks to a local **Bonsai llama-server**, which is
+llama.cpp's `llama-server` speaking the **OpenAI-compatible API on
+`http://localhost:8080`** (`/v1/models`, `/v1/chat/completions`,
+`/health`). It reuses the existing OpenAI client wholesale — `apiKind()`
+returns `"openai"` for it, so there is no Bonsai-specific request code.
+Default URL lives in `DEFAULT_DATA.settings.bonsaiUrl`.
+
+Things that follow from it being llama.cpp:
+
+- **Tool calling** (the full tool set — see below) and **vision** work
+  because the demo 27B server is started with `--jinja` and `--mmproj`.
+  Nothing Bonsai-specific in the plugin.
+- **Thinking is separated for free.** The model streams its scratchpad in
+  `delta.reasoning_content`, which `applyDelta()` (`src/lib.ts`) already
+  treats as thinking and keeps out of the reply. No `think: true` flag is
+  sent — that is Ollama-only.
+- **Auto context-detection does not work.** `modelInfo()`'s OpenAI branch
+  queries LM Studio's `/api/v0/models`, which Bonsai lacks; it returns
+  `none` (via `throw: false`) and the context falls back to the manual
+  setting. Not a bug — set the window by hand to match the server's `-c`.
+
+**Running the server on a small/iGPU:** the stock
+`start_llama_server.ps1` launches the 27B with `-ngl 99 -c 0`, and `-c 0`
+means the model's full 262k context — the KV cache OOMs on ~16 GB cards.
+Pass `-c 16384` (or `32768`/`65536`) to the script; it forwards extra
+args after its own, and a later `-c` wins.
+
+## Tools the model can call
+
+Six tools, defined as consts near the top of `src/main.ts` and collected
+into the `TOOLS` array, which both payload builders (`completeOnce` for
+Ollama, `completeOpenAI`) send when `withTools` is on. `chat()` now offers
+tools **unconditionally** (`withTools = true`) — the older `!!note` gate is
+gone, because most tools do not need an open note. Models that cannot call
+tools still work: a capability error containing "tool" flips `withTools`
+off and the round retries.
+
+| Tool | Handler | Touches vault? |
+| --- | --- | --- |
+| `write_to_note` | `toolWriteToNote` | **Yes** — behind `ConfirmWriteModal` |
+| `read_active_note` | `toolReadActiveNote` | No |
+| `search_vault` | `toolSearchVault` | No (read-only; bounded 500 scanned / 8 hits) |
+| `read_note` | `toolReadNote` | No |
+| `web_search` | `toolWebSearch` | No |
+| `fetch_url` | `toolFetchUrl` | No |
+
+`executeTool()` dispatches by name and wraps every handler in a try/catch,
+so a throwing tool returns an error string to the model instead of killing
+the reply. The tool loop runs up to **6 rounds** (was 4) to leave room for
+chains like `web_search` → `fetch_url` → answer.
+
+**Why only `write_to_note` confirms:** it is the only tool that mutates the
+vault, and untrusted text now reaches the model through *more* paths
+(`web_search`, `fetch_url`, `read_note`, attachments). The gate is the one
+thing standing between an injected "append this to their note" and a real
+edit. Do not add a second vault-mutating tool without an equivalent gate,
+and do not "streamline" this one away. See also the note below on
+`write_to_note`.
+
+The handlers reuse existing plugin capabilities (`writeToNote`,
+`webSearch`, `fetchPage`, `vault.cachedRead`) — keep new tools thin
+wrappers over real methods rather than reimplementing logic in the loop.
+
 ## Deferred: the Cloud API key provider
 
 **The code is still here. The UI entry point is deliberately removed.**

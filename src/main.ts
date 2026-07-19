@@ -65,13 +65,15 @@ import logoSvg from "../assets/hephaestus_logo.svg";
 /** Which backend to talk to. Ollama and LM Studio speak different
  *  protocols — Ollama has /api/chat, LM Studio is OpenAI-compatible on
  *  /v1/chat/completions — so the provider picks an API, not just a URL. */
-type Provider = "ollama" | "lmstudio" | "custom";
+type Provider = "ollama" | "lmstudio" | "bonsai" | "custom";
 type ApiKind = "ollama" | "openai";
 
 interface HephSettings {
   provider: Provider;
   ollamaUrl: string;
   lmStudioUrl: string;
+  /** Base URL of a local Bonsai llama-server (OpenAI-compatible on 8080). */
+  bonsaiUrl: string;
   customUrl: string;
   customApi: ApiKind;
   model: string;
@@ -110,6 +112,7 @@ const DEFAULT_DATA: HephData = {
     provider: "ollama",
     ollamaUrl: "http://localhost:11434",
     lmStudioUrl: "http://localhost:1234",
+    bonsaiUrl: "http://localhost:8080",
     customUrl: "",
     customApi: "ollama",
     model: "",
@@ -156,6 +159,110 @@ const WRITE_TOOL = {
     },
   },
 };
+
+const READ_ACTIVE_NOTE_TOOL = {
+  type: "function",
+  function: {
+    name: "read_active_note",
+    description:
+      "Read the full markdown content of the note the user currently has" +
+      " open in Obsidian. Use when you need to see or reference what is in" +
+      " their open note.",
+    parameters: { type: "object", properties: {} },
+  },
+};
+
+const SEARCH_VAULT_TOOL = {
+  type: "function",
+  function: {
+    name: "search_vault",
+    description:
+      "Search the user's Obsidian vault for notes whose path or content" +
+      " matches a query. Returns matching note paths with short snippets," +
+      " which you can then open with read_note.",
+    parameters: {
+      type: "object",
+      required: ["query"],
+      properties: {
+        query: {
+          type: "string",
+          description: "Text to look for in note names and bodies",
+        },
+      },
+    },
+  },
+};
+
+const READ_NOTE_TOOL = {
+  type: "function",
+  function: {
+    name: "read_note",
+    description:
+      "Read the full markdown content of a specific note in the vault," +
+      " identified by its path (as returned by search_vault) or its name.",
+    parameters: {
+      type: "object",
+      required: ["path"],
+      properties: {
+        path: {
+          type: "string",
+          description: "Vault-relative path, or the note's name",
+        },
+      },
+    },
+  },
+};
+
+const WEB_SEARCH_TOOL = {
+  type: "function",
+  function: {
+    name: "web_search",
+    description:
+      "Search the web and return numbered results with titles, URLs, and" +
+      " snippets. Use for current events or facts that are not in the" +
+      " vault. Cite sources with bracketed numbers like [1].",
+    parameters: {
+      type: "object",
+      required: ["query"],
+      properties: {
+        query: { type: "string", description: "The search query" },
+      },
+    },
+  },
+};
+
+const FETCH_URL_TOOL = {
+  type: "function",
+  function: {
+    name: "fetch_url",
+    description:
+      "Fetch a web page and return its readable text. Use to read a" +
+      " web_search result in full, or a URL the user gives you.",
+    parameters: {
+      type: "object",
+      required: ["url"],
+      properties: {
+        url: {
+          type: "string",
+          description: "The absolute http(s) URL to fetch",
+        },
+      },
+    },
+  },
+};
+
+/** The full tool set offered to the model. write_to_note is the only one
+ *  that changes the vault, and it stays behind ConfirmWriteModal because
+ *  untrusted text (web pages, attachments, other notes) reaches the model
+ *  and could try to drive a write. The rest are read-only. */
+const TOOLS = [
+  WRITE_TOOL,
+  READ_ACTIVE_NOTE_TOOL,
+  SEARCH_VAULT_TOOL,
+  READ_NOTE_TOOL,
+  WEB_SEARCH_TOOL,
+  FETCH_URL_TOOL,
+];
 
 // --------------------------------------------------------------- plugin
 
@@ -524,7 +631,9 @@ export default class HephaestusPlugin extends Plugin {
         ? s.ollamaUrl
         : s.provider === "lmstudio"
           ? s.lmStudioUrl
-          : s.customUrl;
+          : s.provider === "bonsai"
+            ? s.bonsaiUrl
+            : s.customUrl;
     return (url || "").trim().replace(/\/+$/, "");
   }
 
@@ -533,6 +642,8 @@ export default class HephaestusPlugin extends Plugin {
     const s = this.data.settings;
     if (s.provider === "ollama") return "ollama";
     if (s.provider === "lmstudio") return "openai";
+    // Bonsai is llama.cpp's llama-server: OpenAI-compatible on /v1.
+    if (s.provider === "bonsai") return "openai";
     return s.customApi;
   }
 
@@ -543,7 +654,9 @@ export default class HephaestusPlugin extends Plugin {
       ? "Ollama"
       : s.provider === "lmstudio"
         ? "LM Studio"
-        : "the cloud provider";
+        : s.provider === "bonsai"
+          ? "Bonsai"
+          : "the cloud provider";
   }
 
   /** Model names from the active backend. Ollama reports them under
@@ -638,12 +751,15 @@ export default class HephaestusPlugin extends Plugin {
   ): Promise<void> {
     const note = this.activeNote();
     let system = SYSTEM_PROMPT;
+    system +=
+      " You have tools: read_active_note and write_to_note act on the note" +
+      " the user currently has open; search_vault and read_note find and" +
+      " read other notes in their vault; web_search and fetch_url look" +
+      " things up online. Call them when they help. Only write to a note" +
+      " when the user explicitly asks you to write, insert, add, or save" +
+      " something into it.";
     if (note) {
-      system +=
-        ` The user's currently open note is "${note.basename}". You can` +
-        " call write_to_note to append markdown to it — but only when the" +
-        " user asks you to write, insert, add, or save something into" +
-        " their note.";
+      system += ` The user's currently open note is "${note.basename}".`;
     }
     const raw: WireMsg[] = [
       { role: "system", content: system },
@@ -661,10 +777,13 @@ export default class HephaestusPlugin extends Plugin {
       });
     }
     raw.push(...messages);
-    let withTools = !!note;
+    // Tools are always offered now — search_vault, web_search and friends
+    // do not need an open note. The capability-error path below still
+    // disables them for models that cannot call tools at all.
+    let withTools = true;
     let withThink = think;
 
-    for (let round = 0; round < 4; round++) {
+    for (let round = 0; round < 6; round++) {
       let res: { content: string; toolCalls: ToolCall[] };
       for (;;) {
         try {
@@ -695,34 +814,7 @@ export default class HephaestusPlugin extends Plugin {
         tool_calls: res.toolCalls,
       });
       for (const tc of res.toolCalls) {
-        let outcome: string;
-        if (tc.function?.name === "write_to_note") {
-          const content = String(tc.function.arguments?.content ?? "");
-          if (content.trim()) {
-            const target = this.activeNote();
-            const approved =
-              !this.data.settings.confirmWrites ||
-              (await new ConfirmWriteModal(
-                this.app,
-                content,
-                target?.basename ?? "your note",
-              ).ask());
-            if (!approved) {
-              // Tell the model plainly, so it reports the refusal
-              // instead of silently retrying the same write.
-              outcome = "The user declined this write. Do not retry it.";
-              new Notice("Hephaestus: write declined");
-            } else {
-              const r = await this.writeToNote(content, false);
-              outcome = r.ok ? r.detail : `Error: ${r.detail}`;
-              new Notice(`Hephaestus: ${r.detail}`);
-            }
-          } else {
-            outcome = "Error: content was empty";
-          }
-        } else {
-          outcome = `Error: unknown tool ${tc.function?.name ?? "?"}`;
-        }
+        const outcome = await this.executeTool(tc);
         raw.push({
           role: "tool",
           content: outcome,
@@ -730,6 +822,139 @@ export default class HephaestusPlugin extends Plugin {
         });
       }
     }
+  }
+
+  /** Run one tool call and return the plain-text outcome fed back to the
+   *  model. Read tools (note, vault, web) run freely; write_to_note is the
+   *  only one that touches the vault and keeps its confirmation gate. */
+  private async executeTool(tc: ToolCall): Promise<string> {
+    const name = tc.function?.name ?? "?";
+    const args = tc.function?.arguments ?? {};
+    try {
+      switch (name) {
+        case "write_to_note":
+          return await this.toolWriteToNote(String(args.content ?? ""));
+        case "read_active_note":
+          return await this.toolReadActiveNote();
+        case "search_vault":
+          return await this.toolSearchVault(String(args.query ?? ""));
+        case "read_note":
+          return await this.toolReadNote(String(args.path ?? ""));
+        case "web_search":
+          return await this.toolWebSearch(String(args.query ?? ""));
+        case "fetch_url":
+          return await this.toolFetchUrl(String(args.url ?? ""));
+        default:
+          return `Error: unknown tool ${name}`;
+      }
+    } catch (err) {
+      return `Error running ${name}: ${(err as Error).message ?? String(err)}`;
+    }
+  }
+
+  /** write_to_note behind the confirmation gate. */
+  private async toolWriteToNote(content: string): Promise<string> {
+    if (!content.trim()) return "Error: content was empty";
+    const target = this.activeNote();
+    if (!target) return "Error: no markdown note is open to write to";
+    const approved =
+      !this.data.settings.confirmWrites ||
+      (await new ConfirmWriteModal(
+        this.app,
+        content,
+        target.basename,
+      ).ask());
+    if (!approved) {
+      // Tell the model plainly, so it reports the refusal instead of
+      // silently retrying the same write.
+      new Notice("Hephaestus: write declined");
+      return "The user declined this write. Do not retry it.";
+    }
+    const r = await this.writeToNote(content, false);
+    new Notice(`Hephaestus: ${r.detail}`);
+    return r.ok ? r.detail : `Error: ${r.detail}`;
+  }
+
+  /** Read the note the user currently has open. */
+  private async toolReadActiveNote(): Promise<string> {
+    const note = this.activeNote();
+    if (!note) return "Error: no markdown note is open";
+    let text = await this.app.vault.cachedRead(note);
+    if (text.length > 12_000) text = text.slice(0, 12_000) + "\n… [truncated]";
+    return `Note "${note.basename}" (${note.path}):\n\n${text}`;
+  }
+
+  /** Keyword search across the vault: match on path first (cheap), then
+   *  body. Bounded so a huge vault cannot freeze a tool call. */
+  private async toolSearchVault(query: string): Promise<string> {
+    const q = query.trim().toLowerCase();
+    if (!q) return "Error: query was empty";
+    const files = this.app.vault.getMarkdownFiles();
+    const hits: string[] = [];
+    let scanned = 0;
+    for (const f of files) {
+      if (hits.length >= 8 || scanned >= 500) break;
+      scanned++;
+      if (f.path.toLowerCase().includes(q)) {
+        hits.push(`- ${f.path}`);
+        continue;
+      }
+      const text = await this.app.vault.cachedRead(f);
+      const idx = text.toLowerCase().indexOf(q);
+      if (idx >= 0) {
+        const snippet = text
+          .slice(Math.max(0, idx - 60), idx + 120)
+          .replace(/\s+/g, " ")
+          .trim();
+        hits.push(`- ${f.path}\n    …${snippet}…`);
+      }
+    }
+    if (hits.length === 0) return `No notes matched "${query}".`;
+    return `Notes matching "${query}":\n${hits.join("\n")}`;
+  }
+
+  /** Read a specific note, by exact path or by name as a fallback. */
+  private async toolReadNote(path: string): Promise<string> {
+    const p = path.trim();
+    if (!p) return "Error: path was empty";
+    let file = this.app.vault.getAbstractFileByPath(p);
+    if (!(file instanceof TFile)) {
+      const lower = p.toLowerCase().replace(/\.md$/, "");
+      file =
+        this.app.vault
+          .getMarkdownFiles()
+          .find(
+            (f) =>
+              f.basename.toLowerCase() === lower ||
+              f.path.toLowerCase() === p.toLowerCase(),
+          ) ?? null;
+    }
+    if (!(file instanceof TFile)) return `Error: no note found at "${path}"`;
+    let text = await this.app.vault.cachedRead(file);
+    if (text.length > 12_000) text = text.slice(0, 12_000) + "\n… [truncated]";
+    return `Note "${file.path}":\n\n${text}`;
+  }
+
+  /** Web search, reusing the configured search backend. */
+  private async toolWebSearch(query: string): Promise<string> {
+    if (!query.trim()) return "Error: query was empty";
+    const result = await this.webSearch(query);
+    if (result === null) {
+      return "Error: web search is unavailable or the backend is unreachable";
+    }
+    if (result.sources.length === 0) return `No web results for "${query}".`;
+    return `Web search results for "${query}":\n\n${result.context}`;
+  }
+
+  /** Fetch a single web page as readable text. */
+  private async toolFetchUrl(url: string): Promise<string> {
+    const u = url.trim();
+    if (!/^https?:\/\//i.test(u)) {
+      return "Error: url must be an absolute http(s) URL";
+    }
+    const page = await this.fetchPage(u, 6000);
+    if (!page) return `Error: could not fetch ${u}`;
+    return `${page.title ? page.title + "\n" : ""}URL: ${u}\n\n${page.text}`;
   }
 
   /** One round-trip to the model. Streams over fetch when CORS allows,
@@ -755,7 +980,7 @@ export default class HephaestusPlugin extends Plugin {
         model,
         stream,
         ...(think ? { think: true } : {}),
-        ...(withTools ? { tools: [WRITE_TOOL] } : {}),
+        ...(withTools ? { tools: TOOLS } : {}),
         messages: raw,
       });
 
@@ -835,7 +1060,7 @@ export default class HephaestusPlugin extends Plugin {
       JSON.stringify({
         model,
         stream,
-        ...(withTools ? { tools: [WRITE_TOOL] } : {}),
+        ...(withTools ? { tools: TOOLS } : {}),
         messages: toOpenAI(raw),
       });
 
@@ -2511,6 +2736,7 @@ class HephSettingTab extends PluginSettingTab {
         d
           .addOption("ollama", "Ollama")
           .addOption("lmstudio", "LM Studio")
+          .addOption("bonsai", "Bonsai")
           // "custom" (Cloud API key) is deliberately not offered — the
           // backend for it does not exist yet. See CLAUDE.md.
           .setValue(s.provider)
@@ -2523,6 +2749,8 @@ class HephSettingTab extends PluginSettingTab {
               s.ollamaUrl = DEFAULT_DATA.settings.ollamaUrl;
             } else if (s.provider === "lmstudio") {
               s.lmStudioUrl = DEFAULT_DATA.settings.lmStudioUrl;
+            } else if (s.provider === "bonsai") {
+              s.bonsaiUrl = DEFAULT_DATA.settings.bonsaiUrl;
             }
             // The new server has its own model list, so the remembered
             // model is unlikely to exist there.
@@ -2561,6 +2789,24 @@ class HephSettingTab extends PluginSettingTab {
             .onChange(async (value) => {
               s.lmStudioUrl =
                 value.trim().replace(/\/+$/, "") || "http://localhost:1234";
+              await this.plugin.persist();
+            }),
+        );
+    } else if (s.provider === "bonsai") {
+      new Setting(containerEl)
+        .setName("Bonsai URL")
+        .setDesc(
+          "The address of your local Bonsai llama-server — start it with" +
+            " scripts/start_llama_server (default port 8080). Enter the base" +
+            " URL without /v1.",
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder("http://localhost:8080")
+            .setValue(s.bonsaiUrl)
+            .onChange(async (value) => {
+              s.bonsaiUrl =
+                value.trim().replace(/\/+$/, "") || "http://localhost:8080";
               await this.plugin.persist();
             }),
         );
