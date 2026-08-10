@@ -12,6 +12,7 @@ import {
   Setting,
   TFile,
   WorkspaceLeaf,
+  normalizePath,
   requestUrl,
   setIcon,
 } from "obsidian";
@@ -964,8 +965,11 @@ export default class HephaestusPlugin extends Plugin {
 
   /** Read a specific note, by exact path or by name as a fallback. */
   private async toolReadNote(path: string): Promise<string> {
-    const p = path.trim();
-    if (!p) return "Error: path was empty";
+    // The path comes from the model, which is looser about them than the
+    // vault is — a leading ./, a doubled slash or a Windows backslash all
+    // miss an exact lookup that would otherwise have hit.
+    const p = normalizePath(path.trim().replace(/\\/g, "/"));
+    if (!path.trim()) return "Error: path was empty";
     let file = this.app.vault.getAbstractFileByPath(p);
     if (!(file instanceof TFile)) {
       const lower = p.toLowerCase().replace(/\.md$/, "");
@@ -3004,11 +3008,11 @@ class HephSettingTab extends PluginSettingTab {
         }),
       );
 
-    containerEl.createEl("h3", { text: "System" });
+    new Setting(containerEl).setName("System").setHeading();
     const sysEl = containerEl.createDiv();
     void this.renderHardware(sysEl);
 
-    containerEl.createEl("h3", { text: "Model context" });
+    new Setting(containerEl).setName("Model context").setHeading();
 
     new Setting(containerEl)
       .setName("Detect context window automatically")
@@ -3104,7 +3108,7 @@ class HephSettingTab extends PluginSettingTab {
         }),
       );
 
-    containerEl.createEl("h3", { text: "Web search" });
+    new Setting(containerEl).setName("Web search").setHeading();
 
     new Setting(containerEl)
       .setName("Search provider")
@@ -3164,7 +3168,7 @@ class HephSettingTab extends PluginSettingTab {
         });
     }
 
-    containerEl.createEl("h3", { text: "Safety" });
+    new Setting(containerEl).setName("Safety").setHeading();
 
     new Setting(containerEl)
       .setName("Confirm before writing to a note")
