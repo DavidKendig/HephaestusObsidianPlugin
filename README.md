@@ -7,8 +7,9 @@
 <p align="center"><em>Chat with your AI in Obsidian.</em></p>
 
 <p align="center">
-  <strong>0.8.268 — BETA.</strong> Usable daily, but the interface and the
-  stored data format may still change between releases.
+  <strong>0.8.269 — BETA.</strong> Usable daily, but the interface and the
+  stored data format may still change between releases. Requires Obsidian
+  1.13.0 or later.
 </p>
 
 Hephaestus, stripped down to run as an [Obsidian](https://obsidian.md)

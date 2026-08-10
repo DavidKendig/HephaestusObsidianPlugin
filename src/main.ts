@@ -3199,7 +3199,7 @@ class HephSettingTab extends PluginSettingTab {
       .addButton((btn) =>
         btn
           .setButtonText("Clear")
-          .setWarning()
+          .setDestructive()
           .onClick(async () => {
             // Take the stored images with it, or they linger with
             // nothing referencing them.
