@@ -1032,19 +1032,21 @@ export default class HephaestusPlugin extends Plugin {
     // miss an exact lookup that would otherwise have hit.
     const p = normalizePath(path.trim().replace(/\\/g, "/"));
     if (!path.trim()) return "Error: path was empty";
-    let file = this.app.vault.getAbstractFileByPath(p);
-    if (!(file instanceof TFile)) {
-      const lower = p.toLowerCase().replace(/\.md$/, "");
-      file =
-        this.app.vault
-          .getMarkdownFiles()
-          .find(
-            (f) =>
-              f.basename.toLowerCase() === lower ||
-              f.path.toLowerCase() === p.toLowerCase(),
-          ) ?? null;
-    }
-    if (!(file instanceof TFile)) return `Error: no note found at "${path}"`;
+    const exact = this.app.vault.getAbstractFileByPath(p);
+    // Obsidian's own link resolution, answered from the metadata cache
+    // without walking the vault. It also picks the same note a
+    // [[wikilink]] would, rather than whichever same-named file a scan
+    // happened to reach first — with "Recipes/Index" and
+    // "Projects/Index" both present, the old fallback returned an
+    // arbitrary one of the two and looked authoritative doing it.
+    const file =
+      exact instanceof TFile
+        ? exact
+        : this.app.metadataCache.getFirstLinkpathDest(
+            p.replace(/\.md$/i, ""),
+            "",
+          );
+    if (!file) return `Error: no note found at "${path}"`;
     let text = await this.app.vault.cachedRead(file);
     if (text.length > 12_000) text = text.slice(0, 12_000) + "\n… [truncated]";
     return `Note "${file.path}":\n\n${text}`;
