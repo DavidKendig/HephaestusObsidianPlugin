@@ -1,0 +1,3 @@
+# Keep line endings stable across platforms. Without this, a Windows editor
+# can rewrite every file as CRLF and produce a diff that touches all lines.
+* text=auto eol=lf
