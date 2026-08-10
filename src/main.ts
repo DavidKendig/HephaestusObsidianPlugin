@@ -12,6 +12,7 @@ import {
   Setting,
   TFile,
   WorkspaceLeaf,
+  normalizePath,
   requestUrl,
   setIcon,
 } from "obsidian";
@@ -22,6 +23,7 @@ import {
   Attachment,
   ChatMessage,
   Hardware,
+  LoadedModel,
   ModelInfo,
   SearchProvider,
   SearchSource,
@@ -42,7 +44,9 @@ import {
   parseBrave,
   parseLmStudioModels,
   parseLspci,
+  offloadVerdict,
   parseNvidiaSmi,
+  parseOllamaPs,
   parseOllamaShow,
   parseSearxng,
   pdfTextFromContent,
@@ -65,15 +69,13 @@ import logoSvg from "../assets/hephaestus_logo.svg";
 /** Which backend to talk to. Ollama and LM Studio speak different
  *  protocols — Ollama has /api/chat, LM Studio is OpenAI-compatible on
  *  /v1/chat/completions — so the provider picks an API, not just a URL. */
-type Provider = "ollama" | "lmstudio" | "bonsai" | "custom";
+type Provider = "ollama" | "lmstudio" | "custom";
 type ApiKind = "ollama" | "openai";
 
 interface HephSettings {
   provider: Provider;
   ollamaUrl: string;
   lmStudioUrl: string;
-  /** Base URL of a local Bonsai llama-server (OpenAI-compatible on 8080). */
-  bonsaiUrl: string;
   customUrl: string;
   customApi: ApiKind;
   model: string;
@@ -82,10 +84,16 @@ interface HephSettings {
   readNote: boolean;
   /** Ask before the model writes into a note. */
   confirmWrites: boolean;
-  /** Context window in tokens, used for the usage gauge and trimming. */
+  /** Context window in tokens. Drives the usage gauge and trimming, and
+   *  is sent to Ollama as num_ctx — so it also costs video memory, since
+   *  the KV cache scales with it. */
   contextTokens: number;
   /** Read the context window from the model instead of the setting. */
   autoContext: boolean;
+  /** Layers to place on the GPU, or -1 to let the server decide. An
+   *  escape hatch for when its own estimate overcommits video memory,
+   *  not a knob with a better default than "auto". */
+  gpuLayers: number;
   /** Which web-search backend to use. */
   searchProvider: SearchProvider;
   /** Base URL of a self-hosted SearXNG instance. */
@@ -112,7 +120,6 @@ const DEFAULT_DATA: HephData = {
     provider: "ollama",
     ollamaUrl: "http://localhost:11434",
     lmStudioUrl: "http://localhost:1234",
-    bonsaiUrl: "http://localhost:8080",
     customUrl: "",
     customApi: "ollama",
     model: "",
@@ -122,6 +129,7 @@ const DEFAULT_DATA: HephData = {
     confirmWrites: true,
     contextTokens: 8192,
     autoContext: true,
+    gpuLayers: -1,
     searchProvider: "duckduckgo",
     searxngUrl: "",
     braveKey: "",
@@ -279,11 +287,24 @@ export default class HephaestusPlugin extends Plugin {
       conversations: stored?.conversations ?? [],
     };
 
-    // "custom" is the unreleased cloud provider. It is no longer
-    // selectable, so anyone left on it from an earlier build would have
-    // a server they cannot reach and no way back — move them to Ollama.
-    if (this.data.settings.provider === "custom") {
-      this.data.settings.provider = "ollama";
+    // Two provider values are no longer selectable: "custom", the
+    // unreleased cloud provider, and "bonsai", a llama.cpp llama-server
+    // entry that has been withdrawn. Anyone left on either from an
+    // earlier build would have a server they cannot reach and no way
+    // back, so migrate them on load.
+    const s = this.data.settings as HephSettings & { bonsaiUrl?: string };
+    if (s.provider === "custom") {
+      s.provider = "ollama";
+      await this.persist();
+    } else if ((s.provider as string) === "bonsai") {
+      // llama-server is OpenAI-compatible, which is exactly what the LM
+      // Studio entry speaks, so carrying the address across keeps a
+      // working setup working — same protocol, different label. Auto
+      // context-detection was already unavailable there (llama-server
+      // has no /api/v0/models), so nothing changes on that front either.
+      s.provider = "lmstudio";
+      if (s.bonsaiUrl) s.lmStudioUrl = s.bonsaiUrl;
+      delete s.bonsaiUrl;
       await this.persist();
     }
 
@@ -389,6 +410,7 @@ export default class HephaestusPlugin extends Plugin {
       ramFree: os.freemem(),
       gpu: null,
       vram: null,
+      vramUsed: null,
       unified: false,
       platform: process.platform,
     };
@@ -410,6 +432,7 @@ export default class HephaestusPlugin extends Plugin {
       if (smi) {
         hw.gpu = smi.name;
         hw.vram = smi.vram;
+        hw.vramUsed = smi.vramUsed;
       }
     }
 
@@ -488,13 +511,20 @@ export default class HephaestusPlugin extends Plugin {
 
   /** NVIDIA probe for Windows and Linux; the only source that reports
    *  real VRAM on those platforms. */
-  private runNvidiaSmi(): Promise<{ name: string; vram: number } | null> {
+  private runNvidiaSmi(): Promise<{
+    name: string;
+    vram: number;
+    vramUsed: number | null;
+  } | null> {
     return new Promise((resolve) => {
       try {
         // execFile, not exec: fixed argument list, no shell involved.
         execFile(
           "nvidia-smi",
-          ["--query-gpu=name,memory.total", "--format=csv,noheader"],
+          [
+            "--query-gpu=name,memory.total,memory.used",
+            "--format=csv,noheader",
+          ],
           { timeout: 3000, windowsHide: true },
           (err, stdout) => {
             resolve(err ? null : parseNvidiaSmi(String(stdout)));
@@ -504,6 +534,32 @@ export default class HephaestusPlugin extends Plugin {
         resolve(null);
       }
     });
+  }
+
+  /** A fresh video-memory reading, bypassing the hardware cache.
+   *
+   *  Total VRAM never changes and is cached; how much is *in use* changes
+   *  by the second, so a cached value would be worse than none. Only
+   *  NVIDIA reports this — elsewhere the caller gets null and says so. */
+  async liveVram(): Promise<{ total: number; used: number } | null> {
+    const smi = await this.runNvidiaSmi();
+    if (!smi || smi.vramUsed === null) return null;
+    return { total: smi.vram, used: smi.vramUsed };
+  }
+
+  /** What the server currently holds in memory, and how much of it sits
+   *  on the GPU. Ollama only: there is no /api/ps equivalent in the
+   *  OpenAI-compatible shape. */
+  async loadedModels(): Promise<LoadedModel[]> {
+    if (this.apiKind() !== "ollama") return [];
+    try {
+      const resp = await requestUrl({ url: `${this.baseUrl()}/api/ps` });
+      return parseOllamaPs(resp.json);
+    } catch {
+      // Server down or too old for /api/ps — not worth an error here,
+      // the panel simply omits the section.
+      return [];
+    }
   }
 
   /** GPU name via WebGL's unmasked renderer string. */
@@ -631,9 +687,7 @@ export default class HephaestusPlugin extends Plugin {
         ? s.ollamaUrl
         : s.provider === "lmstudio"
           ? s.lmStudioUrl
-          : s.provider === "bonsai"
-            ? s.bonsaiUrl
-            : s.customUrl;
+          : s.customUrl;
     return (url || "").trim().replace(/\/+$/, "");
   }
 
@@ -642,8 +696,6 @@ export default class HephaestusPlugin extends Plugin {
     const s = this.data.settings;
     if (s.provider === "ollama") return "ollama";
     if (s.provider === "lmstudio") return "openai";
-    // Bonsai is llama.cpp's llama-server: OpenAI-compatible on /v1.
-    if (s.provider === "bonsai") return "openai";
     return s.customApi;
   }
 
@@ -654,9 +706,7 @@ export default class HephaestusPlugin extends Plugin {
       ? "Ollama"
       : s.provider === "lmstudio"
         ? "LM Studio"
-        : s.provider === "bonsai"
-          ? "Bonsai"
-          : "the cloud provider";
+        : "the cloud provider";
   }
 
   /** Model names from the active backend. Ollama reports them under
@@ -915,8 +965,11 @@ export default class HephaestusPlugin extends Plugin {
 
   /** Read a specific note, by exact path or by name as a fallback. */
   private async toolReadNote(path: string): Promise<string> {
-    const p = path.trim();
-    if (!p) return "Error: path was empty";
+    // The path comes from the model, which is looser about them than the
+    // vault is — a leading ./, a doubled slash or a Windows backslash all
+    // miss an exact lookup that would otherwise have hit.
+    const p = normalizePath(path.trim().replace(/\\/g, "/"));
+    if (!path.trim()) return "Error: path was empty";
     let file = this.app.vault.getAbstractFileByPath(p);
     if (!(file instanceof TFile)) {
       const lower = p.toLowerCase().replace(/\.md$/, "");
@@ -975,12 +1028,27 @@ export default class HephaestusPlugin extends Plugin {
       );
     }
     const url = `${this.baseUrl()}/api/chat`;
+    // num_ctx has to be sent, not assumed. Without it Ollama serves its
+    // own default window regardless of what the gauge and the trimmer
+    // here are working to — so a request trimmed to fit 20k tokens was
+    // still being truncated to the server default on arrival, quietly,
+    // with the dropped tokens never reaching the model.
+    const { contextTokens, gpuLayers } = this.data.settings;
+    const options: Record<string, number> = {};
+    if (contextTokens > 0) options.num_ctx = contextTokens;
+    // -1 is "let the server decide", which is both the default and the
+    // right answer nearly always. A manual value is only useful when its
+    // estimate overcommits — and 0 is meaningful (pure CPU), so this
+    // tests the sentinel rather than truthiness.
+    if (gpuLayers >= 0) options.num_gpu = gpuLayers;
+
     const payload = (stream: boolean) =>
       JSON.stringify({
         model,
         stream,
         ...(think ? { think: true } : {}),
         ...(withTools ? { tools: TOOLS } : {}),
+        ...(Object.keys(options).length ? { options } : {}),
         messages: raw,
       });
 
@@ -1292,6 +1360,13 @@ class ContextModal extends Modal {
     messages: number;
     images: number;
     noteName: string | null;
+    /** Shells out to nvidia-smi and queries the server, so it runs
+     *  after the token table is already on screen. */
+    probe: () => Promise<{
+      vram: { total: number; used: number } | null;
+      loaded: LoadedModel[];
+      gpu: string | null;
+    }>;
   };
 
   constructor(app: App, info: ContextModal["info"]) {
@@ -1363,6 +1438,91 @@ class ContextModal extends Modal {
         " model where the server reports it; change it under Settings →" +
         " Community plugins → Hephaestus.",
     });
+
+    // Video memory is the other half of "why is this slow": the context
+    // window can be nowhere near full while the model is spilling onto
+    // the CPU and crawling.
+    const gpuEl = this.contentEl.createDiv({ cls: "heph-ctx-gpu" });
+    gpuEl.createEl("h4", { text: "GPU memory" });
+    gpuEl.createDiv({ cls: "heph-ctx-hint", text: "Checking…" });
+    void this.renderGpu(gpuEl);
+  }
+
+  /** Fill in the GPU section once the probes come back. */
+  private async renderGpu(el: HTMLElement) {
+    let result: Awaited<ReturnType<ContextModal["info"]["probe"]>>;
+    try {
+      result = await this.info.probe();
+    } catch {
+      el.empty();
+      el.createEl("h4", { text: "GPU memory" });
+      el.createDiv({ cls: "heph-ctx-hint", text: "Could not be read." });
+      return;
+    }
+    // The modal may have been closed while the probe was in flight.
+    if (!el.isConnected) return;
+
+    const { vram, loaded, gpu } = result;
+    el.empty();
+    el.createEl("h4", { text: "GPU memory" });
+
+    if (vram) {
+      const ratio = vram.used / vram.total;
+      const pct = Math.round(ratio * 100);
+      // Video memory behaves unlike the context window: it is shared
+      // with the desktop and every other app, and a card sitting at 95%
+      // is the normal state of a model that fits. Only near-full with a
+      // spilled model is a problem, and the offload line says that
+      // outright, so this bar stays neutral rather than alarming.
+      const bar = el.createDiv({ cls: "heph-ctx-bar ok" });
+      bar.createDiv({ cls: "heph-ctx-fill" }).style.width =
+        `${Math.min(pct, 100)}%`;
+      el.createDiv({
+        cls: "heph-ctx-sub",
+        text:
+          `${formatBytes(vram.used)} of ${formatBytes(vram.total)} in use` +
+          ` (${pct}%)${gpu ? ` — ${gpu}` : ""}`,
+      });
+      el.createDiv({
+        cls: "heph-ctx-hint",
+        text: "Card-wide, including your desktop and other apps.",
+      });
+    } else {
+      el.createDiv({
+        cls: "heph-ctx-hint",
+        text: gpu
+          ? `${gpu} — live VRAM readings need nvidia-smi, so usage is` +
+            " unavailable on this card."
+          : "No GPU detected, or nvidia-smi is unavailable.",
+      });
+    }
+
+    if (loaded.length === 0) return;
+
+    const table = el.createEl("table", { cls: "heph-ctx-table" });
+    for (const m of loaded) {
+      const v = offloadVerdict(m);
+      const tr = table.createEl("tr");
+      tr.createEl("td", { text: m.name });
+      tr.createEl("td", {
+        cls: `heph-ctx-num heph-fit-${v.level}`,
+        text: `${Math.round(v.ratio * 100)}% GPU`,
+      });
+      tr.createEl("td", { cls: "heph-ctx-hint", text: v.text });
+    }
+
+    // The actionable half. Without this the numbers just say "slow".
+    if (loaded.some((m) => offloadVerdict(m).level !== "ok")) {
+      el.createEl("p", {
+        cls: "heph-ctx-note",
+        text:
+          "A model that does not fit in video memory is split with the" +
+          " CPU, which is what a stalled-looking reply usually is. Use a" +
+          " smaller model or a tighter quantisation, lower the context" +
+          " window (the KV cache grows with it), or close other GPU" +
+          " applications and load the model again.",
+      });
+    }
   }
 
   onClose() {
@@ -2139,6 +2299,14 @@ class ChatView extends ItemView {
       messages: this.conv?.messages.length ?? 0,
       images,
       noteName: reading ? (note?.basename ?? null) : null,
+      probe: async () => {
+        const [vram, loaded, hw] = await Promise.all([
+          this.plugin.liveVram(),
+          this.plugin.loadedModels(),
+          this.plugin.hardware(),
+        ]);
+        return { vram, loaded, gpu: hw.gpu };
+      },
     }).open();
   }
 
@@ -2736,7 +2904,6 @@ class HephSettingTab extends PluginSettingTab {
         d
           .addOption("ollama", "Ollama")
           .addOption("lmstudio", "LM Studio")
-          .addOption("bonsai", "Bonsai")
           // "custom" (Cloud API key) is deliberately not offered — the
           // backend for it does not exist yet. See CLAUDE.md.
           .setValue(s.provider)
@@ -2749,8 +2916,6 @@ class HephSettingTab extends PluginSettingTab {
               s.ollamaUrl = DEFAULT_DATA.settings.ollamaUrl;
             } else if (s.provider === "lmstudio") {
               s.lmStudioUrl = DEFAULT_DATA.settings.lmStudioUrl;
-            } else if (s.provider === "bonsai") {
-              s.bonsaiUrl = DEFAULT_DATA.settings.bonsaiUrl;
             }
             // The new server has its own model list, so the remembered
             // model is unlikely to exist there.
@@ -2789,24 +2954,6 @@ class HephSettingTab extends PluginSettingTab {
             .onChange(async (value) => {
               s.lmStudioUrl =
                 value.trim().replace(/\/+$/, "") || "http://localhost:1234";
-              await this.plugin.persist();
-            }),
-        );
-    } else if (s.provider === "bonsai") {
-      new Setting(containerEl)
-        .setName("Bonsai URL")
-        .setDesc(
-          "The address of your local Bonsai llama-server — start it with" +
-            " scripts/start_llama_server (default port 8080). Enter the base" +
-            " URL without /v1.",
-        )
-        .addText((text) =>
-          text
-            .setPlaceholder("http://localhost:8080")
-            .setValue(s.bonsaiUrl)
-            .onChange(async (value) => {
-              s.bonsaiUrl =
-                value.trim().replace(/\/+$/, "") || "http://localhost:8080";
               await this.plugin.persist();
             }),
         );
@@ -2861,11 +3008,11 @@ class HephSettingTab extends PluginSettingTab {
         }),
       );
 
-    containerEl.createEl("h3", { text: "System" });
+    new Setting(containerEl).setName("System").setHeading();
     const sysEl = containerEl.createDiv();
     void this.renderHardware(sysEl);
 
-    containerEl.createEl("h3", { text: "Model context" });
+    new Setting(containerEl).setName("Model context").setHeading();
 
     new Setting(containerEl)
       .setName("Detect context window automatically")
@@ -2896,11 +3043,13 @@ class HephSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Context window (tokens)")
       .setDesc(
-        s.autoContext
+        (s.autoContext
           ? "Detected from the selected model. Turn off auto-detect to" +
-              " override."
-          : "Used by the gauge and to trim old messages before a request" +
-              " overflows. Match your model's real context length.",
+              " override. "
+          : "Used by the gauge, to trim old messages before a request" +
+              " overflows, and sent to the server as the window to use. ") +
+          "Costs video memory: the KV cache grows with this number, so" +
+          " lowering it can be what makes a large model fit on the GPU.",
       )
       .addText((text) => {
         text
@@ -2915,6 +3064,39 @@ class HephSettingTab extends PluginSettingTab {
           });
       });
 
+    // Ollama decides the split itself and is usually right. This exists
+    // for the case it is not: on Windows the NVIDIA driver will let a
+    // process overcommit video memory and page it through system RAM,
+    // which thrashes over PCIe and is far slower than a clean CPU
+    // offload. Forcing fewer layers can be a large win there.
+    if (this.plugin.apiKind() === "ollama") {
+      new Setting(containerEl)
+        .setName("GPU layers")
+        .setDesc(
+          "How many model layers to put on the GPU. Leave empty for" +
+            " automatic, which is almost always right. Set a number only" +
+            " if a model that nearly fits runs far slower than the GPU" +
+            " share in the context pane suggests — that points at the" +
+            " driver paging video memory, and capping the layers below" +
+            " what fits avoids it. 0 runs entirely on the CPU.",
+        )
+        .addText((text) => {
+          text
+            .setPlaceholder("auto")
+            .setValue(s.gpuLayers >= 0 ? String(s.gpuLayers) : "")
+            .onChange(async (value) => {
+              const raw = value.trim();
+              const n = Number.parseInt(raw, 10);
+              // Anything unparseable means auto rather than an error:
+              // this field is reached by people already troubleshooting,
+              // and a rejected value they cannot see is worse than a
+              // documented fallback.
+              s.gpuLayers = raw && Number.isFinite(n) && n >= 0 ? n : -1;
+              await this.plugin.persist();
+            });
+        });
+    }
+
     new Setting(containerEl)
       .setName("Let the AI read the active note")
       .setDesc("Sends the open note along with your message.")
@@ -2926,7 +3108,7 @@ class HephSettingTab extends PluginSettingTab {
         }),
       );
 
-    containerEl.createEl("h3", { text: "Web search" });
+    new Setting(containerEl).setName("Web search").setHeading();
 
     new Setting(containerEl)
       .setName("Search provider")
@@ -2986,7 +3168,7 @@ class HephSettingTab extends PluginSettingTab {
         });
     }
 
-    containerEl.createEl("h3", { text: "Safety" });
+    new Setting(containerEl).setName("Safety").setHeading();
 
     new Setting(containerEl)
       .setName("Confirm before writing to a note")

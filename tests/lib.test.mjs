@@ -19,7 +19,9 @@ import {
   parseBrave,
   parseLmStudioModels,
   parseLspci,
+  offloadVerdict,
   parseNvidiaSmi,
+  parseOllamaPs,
   parseOllamaShow,
   pdfTextFromContent,
   parseSearxng,
@@ -449,6 +451,56 @@ test("parseNvidiaSmi picks the largest card and handles units", () => {
   assert.equal(parseNvidiaSmi("command not found"), null);
   // GB/MB spellings are accepted alongside GiB/MiB.
   assert.equal(parseNvidiaSmi("Radeon RX 7900, 24 GB").vram, 24 * 1024 ** 3);
+});
+
+test("parseNvidiaSmi reads the optional memory.used column", () => {
+  const MiB = 1024 ** 2;
+  const gpu = parseNvidiaSmi("NVIDIA GeForce RTX 5070, 12227 MiB, 1264 MiB");
+  assert.equal(gpu.name, "NVIDIA GeForce RTX 5070");
+  assert.equal(gpu.vram, 12227 * MiB);
+  assert.equal(gpu.vramUsed, 1264 * MiB);
+  // Two-column output still parses; used is unknown, not zero. Zero
+  // would read as "nothing on the card", which is a different claim.
+  assert.equal(parseNvidiaSmi("RTX 3060, 12288 MiB").vramUsed, null);
+  // Usage is taken from the same line as the largest card, not mixed
+  // across rows.
+  const multi = parseNvidiaSmi(
+    ["GTX 1050, 4096 MiB, 100 MiB", "RTX 3090, 24576 MiB, 9000 MiB"].join("\n"),
+  );
+  assert.equal(multi.name, "RTX 3090");
+  assert.equal(multi.vramUsed, 9000 * MiB);
+});
+
+test("parseOllamaPs reads the loaded set and skips junk", () => {
+  const models = parseOllamaPs({
+    models: [
+      { name: "llama3:70b", size: 40 * 1024 ** 3, size_vram: 10 * 1024 ** 3 },
+      { name: "", size: 100 },
+      { name: "no-size" },
+      { name: "cpu-only", size: 8 * 1024 ** 3 },
+    ],
+  });
+  assert.equal(models.length, 2);
+  assert.equal(models[0].sizeVram, 10 * 1024 ** 3);
+  // A missing size_vram means nothing reached the GPU.
+  assert.equal(models[1].sizeVram, 0);
+  assert.deepEqual(parseOllamaPs({}), []);
+  assert.deepEqual(parseOllamaPs(null), []);
+  assert.deepEqual(parseOllamaPs({ models: "nope" }), []);
+});
+
+test("offloadVerdict flags CPU spill harder than the share suggests", () => {
+  const GB = 1024 ** 3;
+  const at = (vramGB, sizeGB = 10) =>
+    offloadVerdict({ name: "m", size: sizeGB * GB, sizeVram: vramGB * GB });
+
+  assert.equal(at(10).level, "ok");
+  // Just under full is still a real slowdown, not a rounding artifact.
+  assert.equal(at(9.5).level, "warn");
+  assert.equal(at(5).level, "danger");
+  assert.equal(at(0).level, "danger");
+  assert.match(at(0).text, /entirely on the CPU/);
+  assert.equal(at(5).ratio, 0.5);
 });
 
 test("fitVerdict prefers VRAM, falls back to RAM, then warns", () => {

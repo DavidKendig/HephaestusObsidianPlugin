@@ -7,7 +7,7 @@
 <p align="center"><em>Chat with your AI in Obsidian.</em></p>
 
 <p align="center">
-  <strong>0.8.267 — BETA.</strong> Usable daily, but the interface and the
+  <strong>0.8.268 — BETA.</strong> Usable daily, but the interface and the
   stored data format may still change between releases.
 </p>
 
@@ -136,14 +136,56 @@ the number by hand. Detected values are capped at 131,072 tokens: some
 models advertise far more than the machine can actually serve, and a
 gauge scaled to a million tokens would read 0% forever.
 
-That number drives two things: the gauge in the composer, and trimming.
-When a request would overflow, the oldest messages are dropped and a
-notice says how many — a model that has quietly forgotten the start of a
-thread just looks like it got worse, so this is deliberately loud.
+That number drives three things: the gauge in the composer, trimming, and
+the window the server itself uses. When a request would overflow, the
+oldest messages are dropped and a notice says how many — a model that has
+quietly forgotten the start of a thread just looks like it got worse, so
+this is deliberately loud.
+
+It is sent to Ollama as `num_ctx`. That matters more than it sounds:
+without it the server runs at its own default no matter what this setting
+says, so a request carefully trimmed to fit 20k tokens arrives and is
+truncated to the default anyway — silently, with the dropped tokens never
+reaching the model. It also means the setting **costs video memory**,
+because the KV cache scales with the window. Lowering it is one of the
+few levers that can make a large model fit on the GPU.
+
+There is no equivalent on the OpenAI-compatible path: LM Studio and
+friends take the context length from how the model was loaded, not from
+the request.
+
+### GPU layers
+
+**Leave this on automatic.** Ollama decides how much of a model to place
+on the GPU and is usually right, and the field is empty by default.
+
+It exists for the case where it is not. On Windows the NVIDIA driver
+will let a process overcommit video memory and page the excess through
+system RAM, which thrashes over PCIe and is far slower than a clean CPU
+offload — the difference between "slow" and "apparently frozen". The
+symptom is a model performing much worse than the GPU share in the
+context pane suggests it should. Capping the layers below what fits
+sidesteps it. `0` runs entirely on the CPU. Ollama only.
 
 Token counts are estimated at ~4 characters per token, and images are
 counted at a flat 800. Both are approximations meant to drive a gauge,
 not to match your model's tokenizer exactly.
+
+### GPU memory
+
+The same pane reports video memory underneath the token table, because a
+full context window is only one of the two reasons a reply crawls. It
+shows card-wide VRAM in use (NVIDIA only — read live from `nvidia-smi`,
+never cached) and, for Ollama, how much of each loaded model actually
+sits on the GPU.
+
+That last number is the one worth watching. When a model does not fit,
+Ollama splits it with the CPU rather than failing, and every token then
+has to cross the CPU-resident layers — so a model 80% on the GPU does
+not run at 80% speed, it runs at a small fraction of it. That is what a
+"hang" on a large model almost always is. The fix is a smaller model or
+quantisation, a lower context window (the KV cache grows with it), or
+freeing the card and reloading.
 
 ## Note writing and prompt injection
 

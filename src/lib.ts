@@ -554,6 +554,10 @@ export interface Hardware {
   gpu: string | null;
   /** Bytes of dedicated video memory, when it can be determined. */
   vram: number | null;
+  /** Bytes of video memory in use right now, across everything on the
+   *  card — not just the model server. Only nvidia-smi reports this;
+   *  null everywhere else. */
+  vramUsed: number | null;
   /** Apple silicon and most integrated GPUs share system RAM rather than
    *  having dedicated VRAM, which changes what "fits" means entirely. */
   unified: boolean;
@@ -573,23 +577,37 @@ export function formatBytes(bytes: number): string {
   return `${n >= 10 || i === 0 ? Math.round(n) : n.toFixed(1)} ${units[i]}`;
 }
 
-/** Parse `nvidia-smi --query-gpu=name,memory.total --format=csv,noheader`.
- *  Returns the largest card, which is the one a model would land on. */
+/** Parse `nvidia-smi --query-gpu=name,memory.total[,memory.used]
+ *  --format=csv,noheader`. Returns the largest card, which is the one a
+ *  model would land on. The used column is optional so that output from
+ *  the older two-column query still parses. */
 export function parseNvidiaSmi(
   stdout: string,
-): { name: string; vram: number } | null {
-  let best: { name: string; vram: number } | null = null;
+): { name: string; vram: number; vramUsed: number | null } | null {
+  const toBytes = (value: string, unit: string): number => {
+    const n = Number.parseFloat(value);
+    if (!Number.isFinite(n)) return Number.NaN;
+    const u = unit.toLowerCase();
+    return u === "mib" || u === "mb" ? n * 1024 ** 2 : n * 1024 ** 3;
+  };
+
+  let best: { name: string; vram: number; vramUsed: number | null } | null =
+    null;
   for (const line of stdout.split("\n")) {
-    const m = line.match(/^\s*(.+?),\s*([\d.]+)\s*(MiB|GiB|MB|GB)\s*$/i);
+    const m = line.match(
+      /^\s*(.+?),\s*([\d.]+)\s*(MiB|GiB|MB|GB)(?:\s*,\s*([\d.]+)\s*(MiB|GiB|MB|GB))?\s*$/i,
+    );
     if (!m) continue;
-    const value = Number.parseFloat(m[2]);
-    if (!Number.isFinite(value)) continue;
-    const unit = m[3].toLowerCase();
-    const bytes =
-      unit === "mib" || unit === "mb"
-        ? value * 1024 * 1024
-        : value * 1024 * 1024 * 1024;
-    if (!best || bytes > best.vram) best = { name: m[1].trim(), vram: bytes };
+    const bytes = toBytes(m[2], m[3]);
+    if (!Number.isFinite(bytes)) continue;
+    const used = m[4] ? toBytes(m[4], m[5]) : Number.NaN;
+    if (!best || bytes > best.vram) {
+      best = {
+        name: m[1].trim(),
+        vram: bytes,
+        vramUsed: Number.isFinite(used) ? used : null,
+      };
+    }
   }
   return best;
 }
@@ -733,6 +751,83 @@ export function fitVerdict(
   return {
     level: "danger",
     text: `Needs ~${formatBytes(needed)}, more than available memory`,
+  };
+}
+
+/** A model the server currently holds in memory. */
+export interface LoadedModel {
+  name: string;
+  /** Total bytes the loaded model occupies, weights plus KV cache. */
+  size: number;
+  /** How much of that lives in video memory. Less than `size` means the
+   *  rest is on the CPU. */
+  sizeVram: number;
+}
+
+/** Parse Ollama's `/api/ps`, which lists what is resident right now.
+ *
+ *  This is the only source that reports the GPU/CPU split directly:
+ *  nvidia-smi shows video memory filling up but not *why*, and a model
+ *  that failed to fit looks identical to one that never loaded. */
+export function parseOllamaPs(body: unknown): LoadedModel[] {
+  const list = (body as { models?: unknown })?.models;
+  if (!Array.isArray(list)) return [];
+  const out: LoadedModel[] = [];
+  for (const raw of list) {
+    const m = raw as Record<string, unknown>;
+    const name = String(m.name ?? m.model ?? "").trim();
+    if (!name) continue;
+    const size = Number(m.size);
+    if (!Number.isFinite(size) || size <= 0) continue;
+    const vram = Number(m.size_vram);
+    out.push({
+      name,
+      size,
+      sizeVram: Number.isFinite(vram) && vram > 0 ? Math.min(vram, size) : 0,
+    });
+  }
+  return out;
+}
+
+/** How much of a loaded model made it onto the GPU, and what that means
+ *  for speed.
+ *
+ *  Partial offload is not a proportional slowdown. Every token has to
+ *  pass through the CPU-resident layers, so a model that is 80% on the
+ *  GPU does not run at 80% speed — it runs at a small fraction of it,
+ *  which is why this reads as a hang rather than as sluggishness. The
+ *  thresholds are therefore harsh on purpose. */
+export function offloadVerdict(m: LoadedModel): {
+  level: FitLevel;
+  ratio: number;
+  text: string;
+} {
+  const ratio = m.size > 0 ? m.sizeVram / m.size : 0;
+  const pct = Math.round(ratio * 100);
+
+  if (ratio >= 0.99) {
+    return {
+      level: "ok",
+      ratio,
+      text: `Fully on the GPU (${formatBytes(m.sizeVram)})`,
+    };
+  }
+  if (ratio <= 0) {
+    return {
+      level: "danger",
+      ratio,
+      text:
+        "Running entirely on the CPU — generation will be extremely slow," +
+        " often a few seconds per word",
+    };
+  }
+  return {
+    level: ratio >= 0.9 ? "warn" : "danger",
+    ratio,
+    text:
+      `Only ${pct}% on the GPU (${formatBytes(m.sizeVram)} of ` +
+      `${formatBytes(m.size)}) — the rest runs on the CPU, which slows` +
+      " generation far more than the missing share suggests",
   };
 }
 

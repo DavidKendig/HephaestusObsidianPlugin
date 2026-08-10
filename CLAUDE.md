@@ -2,34 +2,34 @@
 
 Context for anyone (human or model) picking this codebase up mid-stream.
 
-## The Bonsai provider
+## Two providers, not three
 
-`provider: "bonsai"` talks to a local **Bonsai llama-server**, which is
-llama.cpp's `llama-server` speaking the **OpenAI-compatible API on
-`http://localhost:8080`** (`/v1/models`, `/v1/chat/completions`,
-`/health`). It reuses the existing OpenAI client wholesale — `apiKind()`
-returns `"openai"` for it, so there is no Bonsai-specific request code.
-Default URL lives in `DEFAULT_DATA.settings.bonsaiUrl`.
+`provider` is `"ollama"` or `"lmstudio"`. A third entry, `"bonsai"` —
+llama.cpp's `llama-server` on port 8080 — was added and then **removed
+entirely**; unlike the Cloud API key provider below, none of its code is
+retained. It never needed any: `apiKind()` returned `"openai"` for it, so
+it rode the existing OpenAI client and deleting it cost nothing.
 
-Things that follow from it being llama.cpp:
+The one remnant is a migration in `onload`, which moves anyone stored on
+`"bonsai"` to `"lmstudio"` and carries `bonsaiUrl` over into
+`lmStudioUrl`. That is behaviour-preserving rather than a redirect —
+`llama-server` is OpenAI-compatible, which is the protocol the LM Studio
+entry speaks, so an existing server on `:8080` keeps working under a
+different label. Do not drop this migration while any `data.json` in the
+wild might still say `bonsai`.
 
-- **Tool calling** (the full tool set — see below) and **vision** work
-  because the demo 27B server is started with `--jinja` and `--mmproj`.
-  Nothing Bonsai-specific in the plugin.
-- **Thinking is separated for free.** The model streams its scratchpad in
-  `delta.reasoning_content`, which `applyDelta()` (`src/lib.ts`) already
-  treats as thinking and keeps out of the reply. No `think: true` flag is
-  sent — that is Ollama-only.
-- **Auto context-detection does not work.** `modelInfo()`'s OpenAI branch
-  queries LM Studio's `/api/v0/models`, which Bonsai lacks; it returns
+Two things learned there that apply to **any** OpenAI-compatible server,
+not just LM Studio:
+
+- **Thinking separates for free.** A model that streams its scratchpad in
+  `delta.reasoning_content` is handled by `applyDelta()` (`src/lib.ts`),
+  which treats it as thinking and keeps it out of the reply. No
+  `think: true` is sent — that flag is Ollama-only.
+- **Auto context-detection is LM Studio-specific.** `modelInfo()`'s
+  OpenAI branch queries `/api/v0/models`, which is LM Studio's own API
+  and not part of the OpenAI-compatible surface. Anything else returns
   `none` (via `throw: false`) and the context falls back to the manual
-  setting. Not a bug — set the window by hand to match the server's `-c`.
-
-**Running the server on a small/iGPU:** the stock
-`start_llama_server.ps1` launches the 27B with `-ngl 99 -c 0`, and `-c 0`
-means the model's full 262k context — the KV cache OOMs on ~16 GB cards.
-Pass `-c 16384` (or `32768`/`65536`) to the script; it forwards extra
-args after its own, and a later `-c` wins.
+  setting. Not a bug — set the window by hand to match the server.
 
 ## Tools the model can call
 

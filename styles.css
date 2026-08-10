@@ -451,13 +451,51 @@
 .heph-ctx-num {
   text-align: right;
   white-space: nowrap;
-  padding-left: 10px !important;
+  padding-left: 10px;
   font-variant-numeric: tabular-nums;
 }
 
 .heph-ctx-hint {
-  padding-left: 10px !important;
+  padding-left: 10px;
   color: var(--text-muted);
+}
+
+/* Both classes are used on plain divs (in .heph-ctx-gpu) and on table
+   cells. In a table, `.heph-ctx-table td` above sets the padding
+   shorthand — zeroing padding-left — and outranks a bare class, which is
+   what the !important here used to fight. Scoping to the cell wins on
+   specificity instead, and leaves the div usages untouched. */
+.heph-ctx-table td.heph-ctx-num,
+.heph-ctx-table td.heph-ctx-hint {
+  padding-left: 10px;
+}
+
+.heph-ctx-gpu {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.heph-ctx-gpu h4 {
+  margin: 0 0 8px;
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Offload percentage in the loaded-model table. Colour carries the
+   warning here, so it is paired with the wording in the same row. */
+.heph-fit-ok {
+  color: var(--color-green);
+}
+
+.heph-fit-warn {
+  color: var(--color-yellow);
+}
+
+.heph-fit-danger {
+  color: var(--color-red);
 }
 
 .heph-ctx-note {

@@ -16,6 +16,11 @@ on:
 
 permissions:
   contents: write
+  # Build provenance attestations: id-token to sign, attestations to
+  # record. Obsidian's directory review checks for these so users can
+  # verify main.js was built from this repo rather than uploaded by hand.
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -51,6 +56,16 @@ jobs:
             echo "::error::versions.json has no entry for $TAG"
             exit 1
           fi
+
+      - name: Attest build provenance
+        # Must run after the build and before the release, so the digests
+        # attested are the exact bytes attached below.
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
 
       - name: Publish release
         env:
