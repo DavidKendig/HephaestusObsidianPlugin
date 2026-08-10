@@ -672,23 +672,6 @@ export function parseSystemProfiler(
   return best;
 }
 
-/** Pull a GPU name out of `lspci` output on Linux. */
-export function parseLspci(stdout: string): string | null {
-  for (const line of stdout.split("\n")) {
-    // "01:00.0 VGA compatible controller: NVIDIA Corporation GA104 ..."
-    const m = line.match(
-      /(?:VGA compatible controller|3D controller|Display controller):\s*(.+)$/i,
-    );
-    if (m) {
-      return m[1]
-        .replace(/\s*\(rev [^)]*\)\s*$/i, "")
-        .replace(/\s*\[[^\]]*\]\s*$/, "")
-        .trim();
-    }
-  }
-  return null;
-}
-
 export type FitLevel = "ok" | "warn" | "danger" | "unknown";
 
 /** Rough "will this run well" verdict, in the spirit of llmfit but far

@@ -43,7 +43,6 @@ import {
   pageLabel,
   parseBrave,
   parseLmStudioModels,
-  parseLspci,
   offloadVerdict,
   parseNvidiaSmi,
   parseOllamaPs,
@@ -94,6 +93,11 @@ interface HephSettings {
    *  escape hatch for when its own estimate overcommits video memory,
    *  not a knob with a better default than "auto". */
   gpuLayers: number;
+  /** Run the external tools that report the GPU and its memory. Off
+   *  means the plugin spawns no process and reads nothing outside the
+   *  vault; CPU and RAM still come from Node's own `os`, and the card
+   *  name still comes from WebGL, neither of which leaves the process. */
+  probeHardware: boolean;
   /** Which web-search backend to use. */
   searchProvider: SearchProvider;
   /** Base URL of a self-hosted SearXNG instance. */
@@ -130,6 +134,7 @@ const DEFAULT_DATA: HephData = {
     contextTokens: 8192,
     autoContext: true,
     gpuLayers: -1,
+    probeHardware: true,
     searchProvider: "duckduckgo",
     searxngUrl: "",
     braveKey: "",
@@ -399,6 +404,12 @@ export default class HephaestusPlugin extends Plugin {
 
   private hardwareCache: Hardware | null = null;
 
+  /** Drop the cached readings. Called when the probe setting changes, so
+   *  the next read reflects the new setting rather than the old answer. */
+  invalidateHardware() {
+    this.hardwareCache = null;
+  }
+
   /** Inspect the machine, in the spirit of llmfit: what CPU, how much
    *  RAM, which GPU and how much video memory. Cached because the GPU
    *  probe shells out. */
@@ -417,32 +428,37 @@ export default class HephaestusPlugin extends Plugin {
       platform: process.platform,
     };
 
-    // macOS: system_profiler is authoritative and also tells us whether
-    // the GPU shares system memory (Apple silicon) or has its own.
-    if (process.platform === "darwin") {
-      const mac = await this.runSystemProfiler();
-      if (mac) {
-        hw.gpu = mac.name;
-        hw.vram = mac.vram;
-        hw.unified = mac.unified;
+    // Everything from here to the WebGL fallback either spawns a process
+    // or reads a file outside the vault, so the whole block is behind the
+    // setting. Turning it off costs the video-memory readings, not the
+    // pane: CPU, RAM and the card name below need no such privilege.
+    if (this.data.settings.probeHardware) {
+      // macOS: system_profiler is authoritative and also tells us whether
+      // the GPU shares system memory (Apple silicon) or has its own.
+      if (process.platform === "darwin") {
+        const mac = await this.runSystemProfiler();
+        if (mac) {
+          hw.gpu = mac.name;
+          hw.vram = mac.vram;
+          hw.unified = mac.unified;
+        }
       }
-    }
 
-    // NVIDIA on Windows and Linux: nvidia-smi reports real VRAM.
-    if (!hw.gpu) {
-      const smi = await this.runNvidiaSmi();
-      if (smi) {
-        hw.gpu = smi.name;
-        hw.vram = smi.vram;
-        hw.vramUsed = smi.vramUsed;
+      // NVIDIA on Windows and Linux: nvidia-smi reports real VRAM.
+      if (!hw.gpu) {
+        const smi = await this.runNvidiaSmi();
+        if (smi) {
+          hw.gpu = smi.name;
+          hw.vram = smi.vram;
+          hw.vramUsed = smi.vramUsed;
+        }
       }
-    }
 
-    // Linux AMD: the kernel exposes VRAM through sysfs, no tool needed.
-    if (!hw.vram && process.platform === "linux") {
-      const amd = await this.readAmdSysfs();
-      if (amd) hw.vram = amd;
-      if (!hw.gpu) hw.gpu = await this.runLspci();
+      // Linux AMD: the kernel exposes VRAM through sysfs, no tool needed.
+      if (!hw.vram && process.platform === "linux") {
+        const amd = await this.readAmdSysfs();
+        if (amd) hw.vram = amd;
+      }
     }
 
     // Last resort everywhere: the renderer string names the card but
@@ -475,19 +491,6 @@ export default class HephaestusPlugin extends Plugin {
             resolve(err ? null : parseSystemProfiler(String(stdout)));
           },
         );
-      } catch {
-        resolve(null);
-      }
-    });
-  }
-
-  /** Linux GPU name probe, for cards nvidia-smi does not cover. */
-  private runLspci(): Promise<string | null> {
-    return new Promise((resolve) => {
-      try {
-        execFile("lspci", [], { timeout: 3000 }, (err, stdout) => {
-          resolve(err ? null : parseLspci(String(stdout)));
-        });
       } catch {
         resolve(null);
       }
@@ -544,6 +547,10 @@ export default class HephaestusPlugin extends Plugin {
    *  by the second, so a cached value would be worse than none. Only
    *  NVIDIA reports this — elsewhere the caller gets null and says so. */
   async liveVram(): Promise<{ total: number; used: number } | null> {
+    // Same gate as hardware(): this is the one reading taken live rather
+    // than from the cache, so it would otherwise keep spawning nvidia-smi
+    // long after the setting was turned off.
+    if (!this.data.settings.probeHardware) return null;
     const smi = await this.runNvidiaSmi();
     if (!smi || smi.vramUsed === null) return null;
     return { total: smi.vram, used: smi.vramUsed };
@@ -2803,7 +2810,7 @@ class HephSettingTab extends PluginSettingTab {
       case "darwin":
         return "system_profiler returned nothing";
       case "linux":
-        return "install nvidia-smi, or pciutils for lspci";
+        return "install nvidia-smi for VRAM detection";
       default:
         return "install nvidia-smi for VRAM detection";
     }
@@ -3014,6 +3021,28 @@ class HephSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("System").setHeading();
     const sysEl = containerEl.createDiv();
     void this.renderHardware(sysEl);
+
+    new Setting(containerEl)
+      .setName("Detect GPU and video memory")
+      .setDesc(
+        "Runs nvidia-smi on Windows and Linux, system_profiler on macOS," +
+          " and reads /sys/class/drm on Linux for AMD cards. These are the" +
+          " only sources for how much video memory you have and how much" +
+          " is in use. Turn this off and Hephaestus runs no external" +
+          " command and reads no file outside the vault — the card is still" +
+          " named from WebGL, but its memory reads as unknown.",
+      )
+      .addToggle((t) =>
+        t.setValue(s.probeHardware).onChange(async (value) => {
+          s.probeHardware = value;
+          // The cache holds readings taken under the old setting, so it
+          // has to go or turning this off would leave them on screen.
+          this.plugin.invalidateHardware();
+          await this.plugin.persist();
+          this.plugin.refreshViews();
+          this.display();
+        }),
+      );
 
     new Setting(containerEl).setName("Model context").setHeading();
 

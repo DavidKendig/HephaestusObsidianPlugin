@@ -119,7 +119,7 @@ unknown" rather than failing:
 | Platform | GPU name | VRAM |
 | --- | --- | --- |
 | Windows | `nvidia-smi`, else WebGL renderer | NVIDIA only |
-| Linux | `nvidia-smi`, `lspci`, else WebGL | NVIDIA, plus AMD via sysfs |
+| Linux | `nvidia-smi`, else WebGL renderer | NVIDIA, plus AMD via sysfs |
 | macOS (Apple silicon) | `system_profiler` | Unified — shares system RAM |
 | macOS (Intel) | `system_profiler` | Discrete card VRAM |
 
@@ -178,7 +178,9 @@ The same pane reports video memory underneath the token table, because a
 full context window is only one of the two reasons a reply crawls. It
 shows card-wide VRAM in use (NVIDIA only — read live from `nvidia-smi`,
 never cached) and, for Ollama, how much of each loaded model actually
-sits on the GPU.
+sits on the GPU. The reading requires an external tool; see
+[what this plugin can reach](#what-this-plugin-can-reach) for the exact
+list and the setting that turns it off.
 
 That last number is the one worth watching. When a model does not fit,
 Ollama splits it with the CPU rather than failing, and every token then
@@ -187,6 +189,39 @@ not run at 80% speed, it runs at a small fraction of it. That is what a
 "hang" on a large model almost always is. The fix is a smaller model or
 quantisation, a lower context window (the KV cache grows with it), or
 freeing the card and reloading.
+
+## What this plugin can reach
+
+Obsidian marks Hephaestus as able to run shell commands and read files
+outside the vault, which is true and worth being precise about. Both
+capabilities exist for one feature — reporting your GPU and its memory —
+and both are behind **Detect GPU and video memory** in settings. Turn
+that off and the plugin spawns no process and opens no file outside the
+vault.
+
+The complete list of what it runs, with the exact arguments:
+
+| | |
+| --- | --- |
+| `nvidia-smi` | `--query-gpu=name,memory.total,memory.used --format=csv,noheader` |
+| `system_profiler` | `SPDisplaysDataType -json` (macOS only) |
+
+Both go through `execFile` with a fixed argument list, so no shell is
+involved and nothing you type is ever part of a command. Both have
+timeouts, and a failure — including the tool not being installed — is
+swallowed and reported as "unknown" rather than raised.
+
+The one file read outside the vault is
+`/sys/class/drm/card{0..3}/device/mem_info_vram_total`, a Linux kernel
+file that reports total video memory for AMD cards. The path is fixed,
+it is read-only, and nothing is ever written outside the vault.
+
+Two more things Obsidian reports, for completeness. CPU model, core
+count and RAM come from Node's own `os` module — in-process, no
+subprocess. And the plugin lists vault files (`getFiles`,
+`getMarkdownFiles`) to populate the attach-from-vault picker and to run
+the `search_vault` tool; it reads a file's contents only through
+Obsidian's own `cachedRead`.
 
 ## Note writing and prompt injection
 

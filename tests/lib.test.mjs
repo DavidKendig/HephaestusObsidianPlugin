@@ -18,7 +18,6 @@ import {
   pageLabel,
   parseBrave,
   parseLmStudioModels,
-  parseLspci,
   offloadVerdict,
   parseNvidiaSmi,
   parseOllamaPs,
@@ -562,15 +561,6 @@ test("parseSystemProfiler survives malformed input", () => {
   assert.equal(parseSystemProfiler("not json"), null);
   assert.equal(parseSystemProfiler("{}"), null);
   assert.equal(parseSystemProfiler('{"SPDisplaysDataType":[]}'), null);
-});
-
-test("parseLspci extracts the card name and strips noise", () => {
-  const out = [
-    "00:02.0 Host bridge: Intel Corporation Device 1234",
-    "01:00.0 VGA compatible controller: NVIDIA Corporation GA104 [GeForce RTX 3070] (rev a1)",
-  ].join("\n");
-  assert.equal(parseLspci(out), "NVIDIA Corporation GA104");
-  assert.equal(parseLspci("no gpu here"), null);
 });
 
 test("fitVerdict treats unified memory as one shared pool", () => {
