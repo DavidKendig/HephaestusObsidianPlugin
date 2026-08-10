@@ -68,15 +68,13 @@ import logoSvg from "../assets/hephaestus_logo.svg";
 /** Which backend to talk to. Ollama and LM Studio speak different
  *  protocols — Ollama has /api/chat, LM Studio is OpenAI-compatible on
  *  /v1/chat/completions — so the provider picks an API, not just a URL. */
-type Provider = "ollama" | "lmstudio" | "bonsai" | "custom";
+type Provider = "ollama" | "lmstudio" | "custom";
 type ApiKind = "ollama" | "openai";
 
 interface HephSettings {
   provider: Provider;
   ollamaUrl: string;
   lmStudioUrl: string;
-  /** Base URL of a local Bonsai llama-server (OpenAI-compatible on 8080). */
-  bonsaiUrl: string;
   customUrl: string;
   customApi: ApiKind;
   model: string;
@@ -121,7 +119,6 @@ const DEFAULT_DATA: HephData = {
     provider: "ollama",
     ollamaUrl: "http://localhost:11434",
     lmStudioUrl: "http://localhost:1234",
-    bonsaiUrl: "http://localhost:8080",
     customUrl: "",
     customApi: "ollama",
     model: "",
@@ -289,11 +286,24 @@ export default class HephaestusPlugin extends Plugin {
       conversations: stored?.conversations ?? [],
     };
 
-    // "custom" is the unreleased cloud provider. It is no longer
-    // selectable, so anyone left on it from an earlier build would have
-    // a server they cannot reach and no way back — move them to Ollama.
-    if (this.data.settings.provider === "custom") {
-      this.data.settings.provider = "ollama";
+    // Two provider values are no longer selectable: "custom", the
+    // unreleased cloud provider, and "bonsai", a llama.cpp llama-server
+    // entry that has been withdrawn. Anyone left on either from an
+    // earlier build would have a server they cannot reach and no way
+    // back, so migrate them on load.
+    const s = this.data.settings as HephSettings & { bonsaiUrl?: string };
+    if (s.provider === "custom") {
+      s.provider = "ollama";
+      await this.persist();
+    } else if ((s.provider as string) === "bonsai") {
+      // llama-server is OpenAI-compatible, which is exactly what the LM
+      // Studio entry speaks, so carrying the address across keeps a
+      // working setup working — same protocol, different label. Auto
+      // context-detection was already unavailable there (llama-server
+      // has no /api/v0/models), so nothing changes on that front either.
+      s.provider = "lmstudio";
+      if (s.bonsaiUrl) s.lmStudioUrl = s.bonsaiUrl;
+      delete s.bonsaiUrl;
       await this.persist();
     }
 
@@ -676,9 +686,7 @@ export default class HephaestusPlugin extends Plugin {
         ? s.ollamaUrl
         : s.provider === "lmstudio"
           ? s.lmStudioUrl
-          : s.provider === "bonsai"
-            ? s.bonsaiUrl
-            : s.customUrl;
+          : s.customUrl;
     return (url || "").trim().replace(/\/+$/, "");
   }
 
@@ -687,8 +695,6 @@ export default class HephaestusPlugin extends Plugin {
     const s = this.data.settings;
     if (s.provider === "ollama") return "ollama";
     if (s.provider === "lmstudio") return "openai";
-    // Bonsai is llama.cpp's llama-server: OpenAI-compatible on /v1.
-    if (s.provider === "bonsai") return "openai";
     return s.customApi;
   }
 
@@ -699,9 +705,7 @@ export default class HephaestusPlugin extends Plugin {
       ? "Ollama"
       : s.provider === "lmstudio"
         ? "LM Studio"
-        : s.provider === "bonsai"
-          ? "Bonsai"
-          : "the cloud provider";
+        : "the cloud provider";
   }
 
   /** Model names from the active backend. Ollama reports them under
@@ -2896,7 +2900,6 @@ class HephSettingTab extends PluginSettingTab {
         d
           .addOption("ollama", "Ollama")
           .addOption("lmstudio", "LM Studio")
-          .addOption("bonsai", "Bonsai")
           // "custom" (Cloud API key) is deliberately not offered — the
           // backend for it does not exist yet. See CLAUDE.md.
           .setValue(s.provider)
@@ -2909,8 +2912,6 @@ class HephSettingTab extends PluginSettingTab {
               s.ollamaUrl = DEFAULT_DATA.settings.ollamaUrl;
             } else if (s.provider === "lmstudio") {
               s.lmStudioUrl = DEFAULT_DATA.settings.lmStudioUrl;
-            } else if (s.provider === "bonsai") {
-              s.bonsaiUrl = DEFAULT_DATA.settings.bonsaiUrl;
             }
             // The new server has its own model list, so the remembered
             // model is unlikely to exist there.
@@ -2949,24 +2950,6 @@ class HephSettingTab extends PluginSettingTab {
             .onChange(async (value) => {
               s.lmStudioUrl =
                 value.trim().replace(/\/+$/, "") || "http://localhost:1234";
-              await this.plugin.persist();
-            }),
-        );
-    } else if (s.provider === "bonsai") {
-      new Setting(containerEl)
-        .setName("Bonsai URL")
-        .setDesc(
-          "The address of your local Bonsai llama-server — start it with" +
-            " scripts/start_llama_server (default port 8080). Enter the base" +
-            " URL without /v1.",
-        )
-        .addText((text) =>
-          text
-            .setPlaceholder("http://localhost:8080")
-            .setValue(s.bonsaiUrl)
-            .onChange(async (value) => {
-              s.bonsaiUrl =
-                value.trim().replace(/\/+$/, "") || "http://localhost:8080";
               await this.plugin.persist();
             }),
         );
