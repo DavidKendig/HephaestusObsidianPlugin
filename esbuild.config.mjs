@@ -2,7 +2,9 @@
 // attribution — noted here so the provenance is not lost.
 import esbuild from "esbuild";
 import process from "process";
-import builtins from "builtin-modules";
+// Node's own list, rather than the builtin-modules package: same data,
+// one fewer dependency, and it cannot fall behind the runtime.
+import { builtinModules } from "module";
 
 const prod = process.argv[2] === "production";
 
@@ -20,7 +22,10 @@ const context = await esbuild.context({
     "@codemirror/search",
     "@codemirror/state",
     "@codemirror/view",
-    ...builtins,
+    ...builtinModules,
+    // Bare specifiers are what this codebase imports, but the prefixed
+    // form resolves to the same modules and must not be bundled either.
+    ...builtinModules.map((m) => `node:${m}`),
   ],
   format: "cjs",
   // Obsidian ships a modern Electron, so there is no reason to downlevel
