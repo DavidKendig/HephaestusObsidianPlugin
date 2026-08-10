@@ -350,7 +350,9 @@ export default class HephaestusPlugin extends Plugin {
       leaf = workspace.getRightLeaf(false) ?? workspace.getLeaf(true);
       await leaf.setViewState({ type: VIEW_TYPE, active: true });
     }
-    workspace.revealLeaf(leaf);
+    // Awaited because revealLeaf returns a promise on current Obsidian;
+    // it returned void on older ones, and awaiting void is harmless.
+    await workspace.revealLeaf(leaf);
   }
 
   // ---------------------------------------------------- active note io
@@ -615,7 +617,8 @@ export default class HephaestusPlugin extends Plugin {
     if (!(await this.app.vault.adapter.exists(dir))) {
       await this.app.vault.adapter.mkdir(dir);
     }
-    const safe = name.replace(/[^\w.\-]+/g, "_").slice(-40);
+    // The dash is last in the class, so it is a literal and needs no escape.
+    const safe = name.replace(/[^\w.-]+/g, "_").slice(-40);
     const path = `${dir}/${Date.now().toString(36)}-${Math.random()
       .toString(36)
       .slice(2, 8)}-${safe}`;

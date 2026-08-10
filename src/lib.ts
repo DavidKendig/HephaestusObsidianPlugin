@@ -527,10 +527,8 @@ export function parseLmStudioModels(
     const ctx = m.max_context_length ?? m.loaded_context_length;
     return {
       contextLength: typeof ctx === "number" ? ctx : null,
-      parameterSize:
-        typeof m.arch === "string" ? (m.arch as string) : null,
-      quantization:
-        typeof m.quantization === "string" ? (m.quantization as string) : null,
+      parameterSize: typeof m.arch === "string" ? m.arch : null,
+      quantization: typeof m.quantization === "string" ? m.quantization : null,
     };
   }
   return empty;
@@ -955,7 +953,9 @@ export function takeLines(buffer: string): {
 
 /** Decode one SSE line. Returns null for keep-alives, comments, and the
  *  terminating [DONE] sentinel. */
-export function parseSSELine(line: string): unknown | null {
+// `unknown` already admits null, so the union was writing the same type
+// twice — callers still have to narrow before using the result either way.
+export function parseSSELine(line: string): unknown {
   const trimmed = line.trim();
   if (!trimmed.startsWith("data:")) return null;
   const body = trimmed.slice(5).trim();
