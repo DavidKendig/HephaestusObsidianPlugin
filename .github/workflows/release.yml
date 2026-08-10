@@ -72,17 +72,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          # Anything below 1.0.0 ships as a GitHub prerelease, so it is
-          # labelled BETA in the UI and never served as "latest".
-          FLAGS=""
+          # Below 1.0.0 the title says BETA, but the release is a normal
+          # one. It must NOT be marked --prerelease: GitHub excludes
+          # prereleases from /releases/latest, and Obsidian resolves a
+          # plugin's download that way — so a prerelease 0.x reads to it
+          # as "no release matches your manifest version" even when the
+          # tag, the assets and the manifest all agree. The BETA label
+          # carries the same warning to a human without hiding the
+          # release from the scanner.
           TITLE="$TAG"
           case "$TAG" in
-            0.*) FLAGS="--prerelease"; TITLE="$TAG BETA" ;;
+            0.*) TITLE="$TAG BETA" ;;
           esac
           # main.js is a build artifact and is gitignored, so it only
           # reaches users by being attached here.
           gh release create "$TAG" \
             --title "$TITLE" \
             --generate-notes \
-            $FLAGS \
+            --latest \
             main.js manifest.json styles.css
