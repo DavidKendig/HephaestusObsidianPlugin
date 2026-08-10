@@ -6,13 +6,17 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-    "test": "node esbuild.lib.mjs && node --test tests/lib.test.mjs"
+    "test": "node esbuild.lib.mjs && node --test tests/lib.test.mjs",
+    "lint": "eslint src esbuild.config.mjs esbuild.lib.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "esbuild": "^0.21.0",
+    "eslint": "^9.39.5",
+    "eslint-plugin-obsidianmd": "^0.4.1",
     "obsidian": "~1.13.1",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "typescript-eslint": "^8.66.0"
   },
   "license": "Apache-2.0"
 }

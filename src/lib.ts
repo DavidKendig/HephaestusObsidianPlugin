@@ -34,6 +34,25 @@ export interface ToolCall {
   function?: { name?: string; arguments?: Record<string, unknown> };
 }
 
+/** A string out of untrusted JSON — a search API's response, a model's
+ *  tool arguments, a system tool's output.
+ *
+ *  `String(v)` is wrong here: handed an object it produces the literal
+ *  text "[object Object]" and passes it on as though it were content. A
+ *  model answering `{"content": {...}}` to write_to_note would put that
+ *  eight-character lie in the user's note, and a search result with an
+ *  object title would render it as the heading. Anything that is not
+ *  already text becomes "" instead, which every caller already treats as
+ *  missing.
+ *
+ *  Finite numbers are the one exception: servers legitimately send sizes
+ *  and ids unquoted, and those do have a faithful text form. */
+export function asString(v: unknown): string {
+  if (typeof v === "string") return v;
+  if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  return "";
+}
+
 // ------------------------------------------------------------- encoding
 
 /** Bytes to base64, chunked — a spread over a multi-megabyte image
@@ -422,9 +441,9 @@ export function parseSearxng(body: unknown): SearchSource[] {
     results.map((r) => {
       const x = r as Record<string, unknown>;
       return {
-        title: String(x.title ?? ""),
-        url: String(x.url ?? ""),
-        snippet: String(x.content ?? ""),
+        title: asString(x.title),
+        url: asString(x.url),
+        snippet: asString(x.content),
       };
     }),
   );
@@ -438,10 +457,10 @@ export function parseBrave(body: unknown): SearchSource[] {
     results.map((r) => {
       const x = r as Record<string, unknown>;
       return {
-        title: String(x.title ?? ""),
-        url: String(x.url ?? ""),
+        title: asString(x.title),
+        url: asString(x.url),
         // Brave marks query terms with <strong> in descriptions.
-        snippet: String(x.description ?? "").replace(/<[^>]+>/g, ""),
+        snippet: asString(x.description).replace(/<[^>]+>/g, ""),
       };
     }),
   );
@@ -654,16 +673,14 @@ export function parseSystemProfiler(
     null;
   for (const raw of list) {
     const g = raw as Record<string, unknown>;
-    const name = String(
-      g.sppci_model ?? g._name ?? "",
-    ).trim();
+    const name = asString(g.sppci_model ?? g._name).trim();
     if (!name) continue;
     const vramText = g.spdisplays_vram ?? g.spdisplays_vram_shared;
-    const vram = vramText ? parseSizeString(String(vramText)) : null;
+    const vram = vramText ? parseSizeString(asString(vramText)) : null;
     // Apple's own GPUs share system memory; so does anything reporting
     // only "shared" VRAM.
     const unified =
-      String(g.spdisplays_vendor ?? "").includes("Apple") ||
+      asString(g.spdisplays_vendor).includes("Apple") ||
       /Apple\s+M\d/i.test(name) ||
       (!g.spdisplays_vram && !!g.spdisplays_vram_shared);
     const candidate = { name, vram, unified };
@@ -756,7 +773,7 @@ export function parseOllamaPs(body: unknown): LoadedModel[] {
   const out: LoadedModel[] = [];
   for (const raw of list) {
     const m = raw as Record<string, unknown>;
-    const name = String(m.name ?? m.model ?? "").trim();
+    const name = asString(m.name ?? m.model).trim();
     if (!name) continue;
     const size = Number(m.size);
     if (!Number.isFinite(size) || size <= 0) continue;
@@ -884,7 +901,10 @@ export function parseToolCalls(
     if (!tc.name) continue;
     let args: Record<string, unknown> = {};
     try {
-      args = tc.args ? JSON.parse(tc.args) : {};
+      // JSON.parse is `any`; the shape is a model's tool arguments, so
+      // the cast states what is expected rather than what is guaranteed
+      // — the catch below is what actually handles being wrong.
+      args = tc.args ? (JSON.parse(tc.args) as Record<string, unknown>) : {};
     } catch {
       // A model can emit malformed JSON; treat it as no arguments
       // rather than failing the whole reply.

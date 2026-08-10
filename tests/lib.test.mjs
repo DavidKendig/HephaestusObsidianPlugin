@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   applyDelta,
+  asString,
   clampContext,
   conversationTokens,
   decodePdfString,
@@ -713,4 +714,24 @@ test("streamed SSE parses identically at every chunk boundary", () => {
     assert.equal(r.tools[0].id, "call_abc");
     assert.deepEqual(r.tools[0].function.arguments, { content: "body" });
   }
+});
+
+test("asString refuses to stringify objects into content", () => {
+  // The reason this exists: String({}) is "[object Object]", which reads
+  // as real text everywhere downstream. A model answering an object to
+  // write_to_note must produce nothing, not that string.
+  assert.equal(asString({ a: 1 }), "");
+  assert.equal(asString([1, 2]), "");
+  assert.equal(asString(null), "");
+  assert.equal(asString(undefined), "");
+  assert.equal(asString(true), "");
+  assert.equal(asString(NaN), "");
+  assert.equal(asString(Infinity), "");
+  // Text passes through untouched, including the empty string.
+  assert.equal(asString("hello"), "hello");
+  assert.equal(asString(""), "");
+  // Numbers are the deliberate exception: servers send sizes unquoted.
+  assert.equal(asString(42), "42");
+  assert.equal(asString(0), "0");
+  assert.equal(asString(-1.5), "-1.5");
 });

@@ -121,8 +121,29 @@ quit and relaunch rather than toggling the plugin.
 ```bash
 npm run build   # tsc --noEmit, then esbuild → main.js (minified in prod)
 npm test        # builds src/lib.ts → dist/lib.mjs, runs node --test
+npm run lint    # the checks Obsidian's plugin review runs
 npm run dev     # unminified, inline sourcemap, rebuild on save
 ```
+
+**Run `npm run lint` before submitting anything to the plugin directory.**
+It runs the same `eslint-plugin-obsidianmd` rules the reviewer does, and
+answers in a second what previously took a round trip through their
+report. Expect **0 errors and ~30 warnings**; `eslint.config.mjs` ends
+with a comment explaining each surviving warning and why it stays. A new
+error, or a warning outside those categories, is a real finding.
+
+Two traps worth knowing, both learned the hard way:
+
+- `tsconfig.json` must keep `"types": ["node"]` and `lib`/`target` at
+  ES2022. When they drifted to ES2020, `Array.prototype.at()` was typed
+  only because `@types/node` pulled the ES2022 lib in behind it — so in
+  any environment without those types it degraded to `any` and took ~60
+  downstream values with it. The reviewer lints in exactly such an
+  environment, which is why its report looked far worse than reality.
+- Never swap `this.display()` for `this.update()` in the settings tab on
+  the linter's advice alone. `update()` renders from
+  `getSettingDefinitions()`, which this imperative tab does not
+  implement, so it would render an empty panel.
 
 `src/lib.ts` holds the pure logic and is the only tested part.
 `src/main.ts` imports from it — keep it that way. Testing a *copy* of the

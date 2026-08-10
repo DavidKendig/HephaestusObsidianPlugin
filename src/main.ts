@@ -51,7 +51,9 @@ import {
   pdfTextFromContent,
   parseSystemProfiler,
   parseSSELine,
+  asString,
   parseToolCalls,
+  type ToolCallFragment,
   takeLines,
   titleFrom,
   toBase64,
@@ -70,6 +72,50 @@ import logoSvg from "../assets/hephaestus_logo.svg";
  *  /v1/chat/completions — so the provider picks an API, not just a URL. */
 type Provider = "ollama" | "lmstudio" | "custom";
 type ApiKind = "ollama" | "openai";
+
+/* Shapes of the JSON these servers send back.
+ *
+ * Both `requestUrl(...).json` and `JSON.parse()` hand back `any`, which
+ * spreads untyped values through every caller that touches them. These
+ * describe what the wire actually carries so the value is typed at the
+ * one place it enters the plugin. Every field is optional on purpose:
+ * this is an assertion about a remote server's output, not a guarantee,
+ * so the call sites still guard before using anything. */
+
+interface OllamaTagsBody {
+  models?: { name: string; size?: number }[];
+}
+
+interface OpenAIModelsBody {
+  data?: { id: string }[];
+}
+
+/** One line of Ollama's streamed /api/chat response, and also the body
+ *  of the non-streamed form. */
+interface OllamaChatBody {
+  message?: {
+    content?: string;
+    thinking?: string;
+    tool_calls?: ToolCall[];
+  };
+}
+
+/** A streamed OpenAI delta carries partial tool calls keyed by index;
+ *  the non-streamed form carries the whole message at once. */
+interface OpenAIToolCallDelta {
+  index?: number;
+  id?: string;
+  function?: { name?: string; arguments?: string };
+}
+
+interface OpenAIChatBody {
+  choices?: {
+    message?: {
+      content?: string;
+      tool_calls?: OpenAIToolCallDelta[];
+    };
+  }[];
+}
 
 interface HephSettings {
   provider: Provider;
@@ -336,8 +382,13 @@ export default class HephaestusPlugin extends Plugin {
     this.addSettingTab(new HephSettingTab(this.app, this));
   }
 
-  async onunload() {
-    await this.persist();
+  onunload() {
+    // Obsidian declares onunload as returning void and ignores anything
+    // returned, so awaiting here never delayed teardown — it only made
+    // the signature disagree with the base class. `void` says plainly
+    // that the write is started and not waited on, which is what an
+    // async override was already doing.
+    void this.persist();
   }
 
   /** Write settings and conversations back to disk. Images live in
@@ -597,7 +648,8 @@ export default class HephaestusPlugin extends Plugin {
     if (this.apiKind() !== "ollama") return sizes;
     try {
       const resp = await requestUrl({ url: `${this.baseUrl()}/api/tags` });
-      for (const m of resp.json.models ?? []) {
+      const body = resp.json as OllamaTagsBody;
+      for (const m of body.models ?? []) {
         if (m?.name && typeof m.size === "number") sizes.set(m.name, m.size);
       }
     } catch {
@@ -730,12 +782,12 @@ export default class HephaestusPlugin extends Plugin {
     if (this.apiKind() === "openai") {
       // OpenAI-compatible: { data: [{ id: "model-name" }, …] }
       const resp = await requestUrl({ url: `${base}/v1/models` });
-      return (resp.json.data ?? [])
-        .map((m: { id: string }) => m.id)
-        .filter(Boolean);
+      const body = resp.json as OpenAIModelsBody;
+      return (body.data ?? []).map((m) => m.id).filter(Boolean);
     }
     const resp = await requestUrl({ url: `${base}/api/tags` });
-    return (resp.json.models ?? []).map((m: { name: string }) => m.name);
+    const body = resp.json as OllamaTagsBody;
+    return (body.models ?? []).map((m) => m.name).filter(Boolean);
   }
 
   /** Ask the backend what it knows about a model: context length above
@@ -893,17 +945,17 @@ export default class HephaestusPlugin extends Plugin {
     try {
       switch (name) {
         case "write_to_note":
-          return await this.toolWriteToNote(String(args.content ?? ""));
+          return await this.toolWriteToNote(asString(args.content));
         case "read_active_note":
           return await this.toolReadActiveNote();
         case "search_vault":
-          return await this.toolSearchVault(String(args.query ?? ""));
+          return await this.toolSearchVault(asString(args.query));
         case "read_note":
-          return await this.toolReadNote(String(args.path ?? ""));
+          return await this.toolReadNote(asString(args.path));
         case "web_search":
-          return await this.toolWebSearch(String(args.query ?? ""));
+          return await this.toolWebSearch(asString(args.query));
         case "fetch_url":
-          return await this.toolFetchUrl(String(args.url ?? ""));
+          return await this.toolFetchUrl(asString(args.url));
         default:
           return `Error: unknown tool ${name}`;
       }
@@ -1087,7 +1139,7 @@ export default class HephaestusPlugin extends Plugin {
         buffer = taken.rest;
         for (const line of taken.lines) {
           if (!line.trim()) continue;
-          const chunk = JSON.parse(line);
+          const chunk = JSON.parse(line) as OllamaChatBody;
           if (chunk.message?.thinking) onThinking();
           const token = chunk.message?.content ?? "";
           if (token) {
@@ -1116,7 +1168,7 @@ export default class HephaestusPlugin extends Plugin {
       if (resp.status >= 400) {
         throw new Error(resp.text || `HTTP ${resp.status}`);
       }
-      const message = resp.json.message ?? {};
+      const message = (resp.json as OllamaChatBody).message ?? {};
       const text = message.content ?? "";
       if (text) onToken(text);
       return { content: text, toolCalls: message.tool_calls ?? [] };
@@ -1200,26 +1252,16 @@ export default class HephaestusPlugin extends Plugin {
       if (resp.status >= 400) {
         throw new Error(resp.text || `HTTP ${resp.status}`);
       }
-      const message = resp.json.choices?.[0]?.message ?? {};
+      const message = (resp.json as OpenAIChatBody).choices?.[0]?.message ?? {};
       const text = message.content ?? "";
       if (text) onToken(text);
-      const acc = new Map<
-        number,
-        { id?: string; name: string; args: string }
-      >();
-      (message.tool_calls ?? []).forEach(
-        (
-          tc: {
-            id?: string;
-            function?: { name?: string; arguments?: string };
-          },
-          i: number,
-        ) =>
-          acc.set(i, {
-            id: tc.id,
-            name: tc.function?.name ?? "",
-            args: tc.function?.arguments ?? "",
-          }),
+      const acc = new Map<number, ToolCallFragment>();
+      (message.tool_calls ?? []).forEach((tc, i) =>
+        acc.set(i, {
+          id: tc.id,
+          name: tc.function?.name ?? "",
+          args: tc.function?.arguments ?? "",
+        }),
       );
       return { content: text, toolCalls: parseToolCalls(acc) };
     }
@@ -1931,14 +1973,16 @@ class ChatView extends ItemView {
       i
         .setTitle("Rename…")
         .setIcon("pencil")
-        .onClick(() =>
-          new RenameModal(this.app, conv.title, async (name) => {
+        .onClick(() => {
+          new RenameModal(this.app, conv.title, (name) => {
             conv.title = name;
             conv.updatedAt = Date.now();
-            await this.plugin.persist();
+            // The menu callback is synchronous; the save is not, and
+            // nothing here depends on it having finished.
+            void this.plugin.persist();
             this.refreshConvList();
-          }).open(),
-        ),
+          }).open();
+        }),
     );
 
     menu.addItem((i) =>

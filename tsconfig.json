@@ -4,14 +4,23 @@
     "inlineSourceMap": true,
     "inlineSources": true,
     "module": "ESNext",
-    "target": "ES2020",
+    // Matches esbuild's target. It was ES2020 while the bundle was built
+    // as es2022, so Array.prototype.at() typechecked only because
+    // @types/node happens to pull the ES2022 lib in behind it — in any
+    // environment without those types, .at() silently degraded to `any`
+    // and took everything downstream of it along.
+    "target": "ES2022",
     "allowJs": true,
     "noImplicitAny": true,
     "strictNullChecks": true,
     "moduleResolution": "node",
     "importHelpers": false,
     "isolatedModules": true,
-    "lib": ["DOM", "ES2020"]
+    "lib": ["DOM", "ES2022"],
+    // Stated rather than inferred: this plugin is desktop-only and uses
+    // os, process, child_process and fs, so the Node types are a real
+    // dependency and should fail loudly if they go missing.
+    "types": ["node"]
   },
   "include": ["src/**/*.ts"]
 }
