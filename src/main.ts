@@ -625,7 +625,12 @@ export default class HephaestusPlugin extends Plugin {
   /** GPU name via WebGL's unmasked renderer string. */
   private webglRenderer(): string | null {
     try {
-      const canvas = document.createElement("canvas");
+      // Obsidian's standalone createEl, not the Node method of the same
+      // name: the method appends to the node it is called on, the bare
+      // function returns a detached element. This canvas exists only to
+      // ask WebGL for a renderer string and is dropped immediately, so
+      // it must never reach the document.
+      const canvas = createEl("canvas");
       const gl = (canvas.getContext("webgl") ??
         canvas.getContext(
           "experimental-webgl",

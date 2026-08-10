@@ -48,10 +48,6 @@ export default tseslint.config(
  *   paths. requestUrl cannot stream, and the code already falls back to
  *   it for the non-streaming case.
  *
- * obsidianmd/prefer-create-el (1) — a detached <canvas> used to read the
- *   WebGL renderer string and then dropped. createEl is not on Document
- *   and would attach the element to the DOM.
- *
  * prefer-setting-definitions / prefer-update-over-display /
  * no-deprecated (9) — one decision, not nine. Migrating the settings tab
  *   to getSettingDefinitions() would clear all of them and make settings
